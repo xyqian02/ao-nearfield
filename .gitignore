@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# 虚拟环境
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 操作系统
+.DS_Store
+Thumbs.db
+
+# 仿真数据 (体积大，不纳入版本控制)
+data/
+result/
+figure_data/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# 临时文件
+*.tmp
+_temp_*
