@@ -20,7 +20,8 @@ env/
 .DS_Store
 Thumbs.db
 
-# 仿真数据 (体积大，不纳入版本控制)
+# 仿真数据和辅助文件 (不纳入版本控制)
+accessories/
 data/
 result/
 figure_data/
