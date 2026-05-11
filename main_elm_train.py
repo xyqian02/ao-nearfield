@@ -35,6 +35,8 @@ from src.utils import (
     split_data,
     circ_mask,
     configure_chinese_font,
+    get_data_filename,
+    reconstruct_from_zernike,
 )
 
 
@@ -53,31 +55,19 @@ class Config:
 
     # ---- ELM 参数 ----
     activation: str = "softplus"              # 激活函数: sigmoid/relu/softplus/tanh/sin/rbf
-    hidden_range: tuple = (100, 1000, 50)     # 隐藏层神经元搜索范围 (起始, 结束, 步长)
+    hidden_range: tuple = (100, 1000, 25)     # 隐藏层神经元搜索范围 (起始, 结束, 步长)
     n_hidden: int | None = None               # 指定神经元数 (None=自动搜索最优)
 
     # ---- 可视化参数 ----
     test_index: int = 10                      # 展示测试集中第几个样本
 
     # ---- 随机种子 ----
-    seed: int = 42
+    seed: int = 23
 
     # ---- 路径 ----
     accessories_dir: str = "accessories"
     data_dir: str = "data"
     result_dir: str = "result"
-
-
-def _get_data_name(cfg: Config) -> str:
-    """根据噪声/波前标记生成数据文件名后缀"""
-    if not cfg.flag_noise and not cfg.flag_wf:
-        return f"_{cfg.n_zernike}"
-    elif cfg.flag_noise and not cfg.flag_wf:
-        return f"_{cfg.n_zernike}_noise"
-    elif cfg.flag_noise and cfg.flag_wf:
-        return f"_{cfg.n_zernike}_noise_wf"
-    else:
-        return f"_{cfg.n_zernike}_wf"
 
 
 def main():
@@ -88,20 +78,19 @@ def main():
 
     # ---- 1. 加载数据 ----
     print("加载数据...")
-    name = _get_data_name(cfg)
+    name = get_data_filename(cfg.n_zernike, cfg.flag_noise, cfg.flag_wf)
     InputData = load_mat(os.path.join(cfg.data_dir, f"InputData{name}.mat"))
     OutputData = load_mat(os.path.join(cfg.data_dir, f"OutputData{name}.mat"))
     modes = load_mat(os.path.join(cfg.accessories_dir, "modes250.mat"), "modes")
 
     nZer = OutputData.shape[0] - 1  # 泽尼克阶数
-    nZerRecon = nZer
     print(f"  输入维度: {InputData.shape}, 输出维度: {OutputData.shape}")
     print(f"  泽尼克阶数: {nZer}")
 
     # ---- 2. 划分数据 ----
-    zer_indices = list(range(nZerRecon)) + [OutputData.shape[0] - 1]
+    zer_indices = list(range(nZer)) + [OutputData.shape[0] - 1]
     X = InputData                     # (n_sub, n_samples)
-    y = OutputData[zer_indices, :]    # (nZerRecon+1, n_samples)
+    y = OutputData[zer_indices, :]    # (nZer+1, n_samples)
 
     X_train, X_test, y_train, y_test = split_data(
         X, y, test_ratio=cfg.test_ratio, shuffle=False
@@ -190,9 +179,9 @@ def main():
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
 
     # 折线图
-    x_orders = np.arange(1, nZerRecon + 1)
-    ax1.plot(x_orders, y_test[:nZerRecon, idx], "o-", linewidth=1, label="真实值")
-    ax1.plot(x_orders, pred[:nZerRecon, idx], "s-", linewidth=1, label="预测值")
+    x_orders = np.arange(1, nZer + 1)
+    ax1.plot(x_orders, y_test[:nZer, idx], "o-", linewidth=1, label="真实值")
+    ax1.plot(x_orders, pred[:nZer, idx], "s-", linewidth=1, label="预测值")
     ax1.set_xlabel("泽尼克阶数", fontsize=13)
     ax1.set_ylabel("泽尼克系数", fontsize=13)
     ax1.set_title("泽尼克系数对比", fontsize=13)
@@ -201,8 +190,8 @@ def main():
 
     # 柱状图
     bar_width = 0.35
-    ax2.bar(x_orders - bar_width / 2, y_test[:nZerRecon, idx], bar_width, label="真实值")
-    ax2.bar(x_orders + bar_width / 2, pred[:nZerRecon, idx], bar_width, label="预测值")
+    ax2.bar(x_orders - bar_width / 2, y_test[:nZer, idx], bar_width, label="真实值")
+    ax2.bar(x_orders + bar_width / 2, pred[:nZer, idx], bar_width, label="预测值")
     ax2.set_xlabel("泽尼克阶数", fontsize=13)
     ax2.set_ylabel("泽尼克系数", fontsize=13)
     ax2.set_title("泽尼克系数对比 (柱状图)", fontsize=13)
@@ -212,13 +201,8 @@ def main():
     plt.show()
 
     # ---- 7. 重构近场分布并对比 ----
-    # 真实近场
-    A0 = np.zeros(240)
-    A1 = np.zeros(240)
-    for i in range(nZer):
-        A0 = A0 + y_test[i, idx] * modes[:, :, i]
-        if i < nZerRecon:
-            A1 = A1 + pred[i, idx] * modes[:, :, i]
+    A0 = reconstruct_from_zernike(y_test[:, idx], modes, nZer)
+    A1 = reconstruct_from_zernike(pred[:, idx], modes, nZer)
 
     # 加上偏移量确保非负
     A0 = A0 + y_test[-1, idx]

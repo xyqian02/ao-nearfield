@@ -8,7 +8,17 @@
 from .optics import Optics
 from .elm import ELM, BaseModel
 from .hartmann import HartmannSensor, create_subcfg, create_sub_valid
-from .utils import load_mat, save_mat, compute_mse, set_seed, configure_chinese_font
+from .utils import (
+    load_mat,
+    save_mat,
+    compute_mse,
+    set_seed,
+    configure_chinese_font,
+    get_data_filename,
+    reconstruct_from_zernike,
+    create_embedded_mask,
+    circ_mask,
+)
 
 __all__ = [
     "Optics",
@@ -22,4 +32,8 @@ __all__ = [
     "compute_mse",
     "set_seed",
     "configure_chinese_font",
+    "get_data_filename",
+    "reconstruct_from_zernike",
+    "create_embedded_mask",
+    "circ_mask",
 ]

@@ -122,7 +122,9 @@ class ELM(BaseModel):
 
         # 通过伪逆求解输出权重: LW = pinv(H^T) @ y^T
         # H^T 形状 (Q, N), y^T 形状 (Q, S), LW 形状 (N, S)
-        self.LW = np.linalg.pinv(H.T) @ y.T
+        # 容差匹配 MATLAB pinv: tol = max(size(A)) * norm(A) * eps
+        rcond = max(H.T.shape) * np.finfo(np.float64).eps
+        self.LW = np.linalg.pinv(H.T, rcond=rcond) @ y.T
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         """

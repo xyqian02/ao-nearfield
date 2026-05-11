@@ -27,6 +27,7 @@ from src.utils import (
     compute_mse,
     split_data,
     configure_chinese_font,
+    get_data_filename,
 )
 
 
@@ -80,15 +81,7 @@ def main():
     pbar = tqdm(zernike_orders, desc="泽尼克阶数分析", unit="阶")
     for idx, NN in enumerate(pbar):
         pbar.set_postfix({"当前阶数": f"{NN}"})
-        # 构建数据文件名
-        if not cfg.flag_noise and not cfg.flag_wf:
-            name = f"_{NN}"
-        elif cfg.flag_noise and not cfg.flag_wf:
-            name = f"_{NN}_noise"
-        elif cfg.flag_noise and cfg.flag_wf:
-            name = f"_{NN}_noise_wf"
-        else:
-            name = f"_{NN}_wf"
+        name = get_data_filename(NN, cfg.flag_noise, cfg.flag_wf)
 
         input_path = os.path.join(cfg.data_dir, f"InputData{name}.mat")
         output_path = os.path.join(cfg.data_dir, f"OutputData{name}.mat")

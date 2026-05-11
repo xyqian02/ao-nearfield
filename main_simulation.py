@@ -34,6 +34,9 @@ from src.utils import (
     split_data,
     circ_mask,
     configure_chinese_font,
+    get_data_filename,
+    reconstruct_from_zernike,
+    create_embedded_mask,
 )
 
 
@@ -79,17 +82,6 @@ class Config:
     result_dir: str = "result"
 
 
-def _get_data_name(cfg: Config) -> str:
-    if not cfg.flag_noise and not cfg.flag_wf:
-        return f"_{cfg.n_zernike_amp}"
-    elif cfg.flag_noise and not cfg.flag_wf:
-        return f"_{cfg.n_zernike_amp}_noise"
-    elif cfg.flag_noise and cfg.flag_wf:
-        return f"_{cfg.n_zernike_amp}_noise_wf"
-    else:
-        return f"_{cfg.n_zernike_amp}_wf"
-
-
 def main():
     cfg = Config()
     set_seed(cfg.seed)
@@ -98,7 +90,7 @@ def main():
 
     # ---- 1. 加载数据 ----
     print("加载数据...")
-    name = _get_data_name(cfg)
+    name = get_data_filename(cfg.n_zernike_amp, cfg.flag_noise, cfg.flag_wf)
     subcfg = load_mat(os.path.join(cfg.accessories_dir, "Subcfg.mat"), "Subcfg")
     modes = load_mat(os.path.join(cfg.accessories_dir, "modes250.mat"), "modes")
     InputData = load_mat(os.path.join(cfg.data_dir, f"InputData{name}.mat"))
@@ -106,12 +98,11 @@ def main():
 
     n_sub = subcfg.shape[1]
     nZer = OutputData.shape[0] - 1
-    nZerRecon = nZer
     print(f"  子孔径数: {n_sub}, 泽尼克阶数: {nZer}")
 
     # ---- 2. ELM 训练 ----
     print("训练 ELM 模型...")
-    zer_indices = list(range(nZerRecon)) + [OutputData.shape[0] - 1]
+    zer_indices = list(range(nZer)) + [OutputData.shape[0] - 1]
     X = InputData
     y = OutputData[zer_indices, :]
 
@@ -155,10 +146,7 @@ def main():
     )
     hs = HartmannSensor(subcfg, optics)
 
-    # 生成标准圆域掩模
-    mask = np.zeros((cfg.image_size, cfg.image_size))
-    temp = Optics.std_beam(240, 100, 100, 1e99)
-    mask[8:248, 8:248] = temp
+    mask = create_embedded_mask(cfg.image_size, 240)
 
     # ---- 4. 哈特曼传感器标定 (平面波) ----
     print("哈特曼传感器标定 (平面波)...")
@@ -192,7 +180,7 @@ def main():
     A0_mat = A0_mat + y_test[-1, idx]  # 最小值偏移
 
     # 6.3 传统方法: 真实光强 + 波前 → 测量斜率 → 复原
-    IntensityMat = mask.copy()
+    IntensityMat = np.zeros_like(mask)
     IntensityMat[8:248, 8:248] = A0_mat
     Input_trad = IntensityMat * np.exp(-1j * wf)
 
@@ -202,12 +190,12 @@ def main():
     # 6.4 本方法: ELM 预测光强 → 测斜率 → 差分
     A1_mat = np.zeros(240)
     for i in range(nZer):
-        if i < nZerRecon:
+        if i < nZer:
             A1_mat = A1_mat + T_sim[i, idx] * modes[:, :, i]
     A1_mat = A1_mat + T_sim[-1, idx]
 
     # ELM预测光强单独入射
-    IntensityMat_R = mask.copy()
+    IntensityMat_R = np.zeros_like(mask)
     IntensityMat_R[8:248, 8:248] = A1_mat
     Input_R = IntensityMat_R  # 纯振幅，无波前
 

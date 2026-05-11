@@ -26,7 +26,7 @@ from tqdm import tqdm
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from src.optics import Optics
-from src.utils import load_mat, save_mat, set_seed, configure_chinese_font
+from src.utils import load_mat, save_mat, set_seed, configure_chinese_font, get_data_filename, reconstruct_from_zernike, create_embedded_mask
 
 
 # ===========================================================================
@@ -104,10 +104,7 @@ def main():
     plt.tight_layout()
     plt.show()
 
-    # ---- 生成标准圆域掩模 ----
-    mask = np.zeros((cfg.image_size, cfg.image_size))
-    temp = Optics.std_beam(240, 100, 100, 1e99)
-    mask[8:248, 8:248] = temp  # MATLAB: Mask(9:248,9:248) → Python 0-based
+    mask = create_embedded_mask(cfg.image_size, 240)
 
     # ---- 数据生成主循环 ----
     os.makedirs(cfg.data_dir, exist_ok=True)
@@ -183,14 +180,7 @@ def main():
                 InputData[iSub, i] = np.sum(spot)
 
         # ---- 保存数据 ----
-        if not cfg.flag_noise and not cfg.flag_wf:
-            suffix = f"_{nZer}"
-        elif cfg.flag_noise and not cfg.flag_wf:
-            suffix = f"_{nZer}_noise"
-        elif cfg.flag_noise and cfg.flag_wf:
-            suffix = f"_{nZer}_noise_wf"
-        else:
-            suffix = f"_{nZer}_wf"
+        suffix = get_data_filename(nZer, cfg.flag_noise, cfg.flag_wf)
 
         input_path = os.path.join(cfg.data_dir, f"InputData{suffix}.mat")
         output_path = os.path.join(cfg.data_dir, f"OutputData{suffix}.mat")

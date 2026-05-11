@@ -34,6 +34,9 @@ from src.utils import (
     reverse_normalize,
     split_data,
     configure_chinese_font,
+    get_data_filename,
+    reconstruct_from_zernike,
+    create_embedded_mask,
 )
 
 
@@ -62,7 +65,7 @@ class Config:
 
     # ---- ELM 参数 ----
     activation: str = "softplus"
-    n_hidden: int = 700
+    n_hidden: int = 500
 
     # ---- 噪声 ----
     noise_sigma: float = 0.5
@@ -71,7 +74,7 @@ class Config:
     n_batch_samples: int | None = None  # None=全部测试集
 
     # ---- 随机种子 ----
-    seed: int = 1
+    seed: int = 10
 
     # ---- 路径 ----
     accessories_dir: str = "accessories"
@@ -104,66 +107,6 @@ MODE_META = {
 # ===========================================================================
 # 辅助函数
 # ===========================================================================
-def _get_data_name(cfg: Config) -> str:
-    """根据噪声/波前标记生成数据文件名后缀"""
-    if not cfg.flag_noise and not cfg.flag_wf:
-        return f"_{cfg.n_zernike_amp}"
-    elif cfg.flag_noise and not cfg.flag_wf:
-        return f"_{cfg.n_zernike_amp}_noise"
-    elif cfg.flag_noise and cfg.flag_wf:
-        return f"_{cfg.n_zernike_amp}_noise_wf"
-    return f"_{cfg.n_zernike_amp}_wf"
-
-
-def _reconstruct_from_coeffs(
-    coeffs: np.ndarray,
-    modes: np.ndarray,
-    wf_modes: int,
-    start_mode: int = 2,
-) -> np.ndarray:
-    """
-    从泽尼克系数重构 240×240 波前分布
-
-    参数:
-        coeffs: 泽尼克系数向量，长度 ≥ wf_modes
-        modes: 泽尼克模式矩阵，形状 (240, 240, N)
-        wf_modes: 使用的波前泽尼克阶数
-        start_mode: 起始阶数 (0-based)，默认2=跳过piston和tilt
-
-    返回:
-        240 × 240 的波前相位分布
-    """
-    wf = np.zeros(240)
-    for i in range(start_mode, wf_modes):
-        wf = wf + coeffs[i] * modes[:, :, i]
-    return wf
-
-
-def _reconstruct_intensity(
-    coeffs: np.ndarray,
-    modes: np.ndarray,
-    n_modes: int,
-    offset: float = 0.0,
-) -> np.ndarray:
-    """
-    从泽尼克系数重构 240×240 光强（振幅）分布
-
-    参数:
-        coeffs: 泽尼克系数向量
-        modes: 泽尼克模式矩阵
-        n_modes: 使用的泽尼克阶数
-        offset: 最小值偏移量
-
-    返回:
-        240 × 240 的光强分布
-    """
-    intensity = np.zeros(240)
-    for i in range(n_modes):
-        intensity = intensity + coeffs[i] * modes[:, :, i]
-    intensity = intensity + offset
-    return intensity
-
-
 def _rms_wavefront_lambda(
     wf_pred: np.ndarray,
     wf_true: np.ndarray,
@@ -192,7 +135,7 @@ def setup_system(cfg: Config) -> dict:
     print("=" * 50)
     print(" 加载数据与初始化")
     print("=" * 50)
-    name = _get_data_name(cfg)
+    name = get_data_filename(cfg.n_zernike_amp, cfg.flag_noise, cfg.flag_wf)
     subcfg = load_mat(os.path.join(cfg.accessories_dir, "Subcfg.mat"), "Subcfg")
     modes = load_mat(os.path.join(cfg.accessories_dir, "modes250.mat"), "modes")
     InputData = load_mat(os.path.join(cfg.data_dir, f"InputData{name}.mat"))
@@ -230,9 +173,7 @@ def setup_system(cfg: Config) -> dict:
     )
     hs = HartmannSensor(subcfg, optics)
 
-    mask = np.zeros((cfg.image_size, cfg.image_size))
-    temp = Optics.std_beam(240, 100, 100, 1e99)
-    mask[8:248, 8:248] = temp
+    mask = create_embedded_mask(cfg.image_size, 240)
 
     print("  哈特曼传感器标定...")
     hs.calibrate(mask, noise_sigma=cfg.noise_sigma)
@@ -286,28 +227,28 @@ def run_single_test(
     """
     # 构建波前全场 (256×256)
     wf_full = np.zeros((cfg.image_size, cfg.image_size))
-    wf_full[8:248, 8:248] = _reconstruct_from_coeffs(
-        coe_wf, modes, cfg.n_wf_modes
+    wf_full[8:248, 8:248] = reconstruct_from_zernike(
+        coe_wf, modes, cfg.n_wf_modes - 2, 2
     )
 
     # 传统方法: 真实光强 + 波前 → 斜率 → 波前复原
-    IntensityMat = mask.copy()
+    IntensityMat = np.zeros_like(mask)
     IntensityMat[8:248, 8:248] = A0_240
     Input_trad = IntensityMat * np.exp(-1j * wf_full)
     slopes_int, _ = hs.measure_slopes(Input_trad, noise_sigma=cfg.noise_sigma)
     recoe = hs.reconstruct(slopes_int, Recon)
 
     # 本方法: ELM光强单独入射 → 差分斜率
-    IntensityMat_R = mask.copy()
+    IntensityMat_R = np.zeros_like(mask)
     IntensityMat_R[8:248, 8:248] = A1_240
     Input_R = IntensityMat_R
     slopes_r, _ = hs.measure_slopes(Input_R, noise_sigma=cfg.noise_sigma)
     recoeR = hs.reconstruct(slopes_int - slopes_r, Recon)
 
     # 重构波前并计算残差
-    wf_0 = _reconstruct_from_coeffs(coe_wf, modes, cfg.n_wf_modes)
-    wf_1 = _reconstruct_from_coeffs(recoe, modes, cfg.n_wf_modes)
-    wf_r = _reconstruct_from_coeffs(recoeR, modes, cfg.n_wf_modes)
+    wf_0 = reconstruct_from_zernike(coe_wf, modes, cfg.n_wf_modes - 2, 2)
+    wf_1 = reconstruct_from_zernike(recoe, modes, cfg.n_wf_modes - 2, 2)
+    wf_r = reconstruct_from_zernike(recoeR, modes, cfg.n_wf_modes - 2, 2)
 
     rms_trad = _rms_wavefront_lambda(wf_1, wf_0, cfg.wavelength)
     rms_prop = _rms_wavefront_lambda(wf_r, wf_0, cfg.wavelength)
@@ -339,8 +280,8 @@ def test_random_combination(cfg: Config, ctx: dict) -> tuple[np.ndarray, np.ndar
         coe = cfg.wf_coeff_std * np.random.randn(cfg.n_wf_modes)
 
         # 数据集中的光强 (每个样本不同)
-        A0_240 = _reconstruct_intensity(y_test[:, index], modes, nZer, y_test[-1, index])
-        A1_240 = _reconstruct_intensity(T_sim[:, index], modes, nZer, T_sim[-1, index])
+        A0_240 = reconstruct_from_zernike(y_test[:, index], modes, nZer, 0) + y_test[-1, index]
+        A1_240 = reconstruct_from_zernike(T_sim[:, index], modes, nZer, 0) + T_sim[-1, index]
 
         RMS_trad[index], RMS_prop[index] = run_single_test(
             ctx["hs"], ctx["mask"], ctx["Recon"], cfg,
@@ -369,12 +310,8 @@ def test_fixed_intensity(cfg: Config, ctx: dict) -> tuple[np.ndarray, np.ndarray
 
     # 提取固定光强分布 (使用测试集第一个样本)
     fixed_idx = 0
-    A0_fixed = _reconstruct_intensity(
-        y_test[:, fixed_idx], modes, nZer, y_test[-1, fixed_idx]
-    )
-    A1_fixed = _reconstruct_intensity(
-        T_sim[:, fixed_idx], modes, nZer, T_sim[-1, fixed_idx]
-    )
+    A0_fixed = reconstruct_from_zernike(y_test[:, fixed_idx], modes, nZer, 0) + y_test[-1, fixed_idx]
+    A1_fixed = reconstruct_from_zernike(T_sim[:, fixed_idx], modes, nZer, 0) + T_sim[-1, fixed_idx]
     print(f"  固定光强取自测试样本 #{fixed_idx}")
 
     RMS_trad = np.zeros(n_batch)
@@ -419,12 +356,8 @@ def test_fixed_wavefront(cfg: Config, ctx: dict) -> tuple[np.ndarray, np.ndarray
 
     for index in tqdm(range(n_batch), desc="固定波前测试", unit="样本"):
         # 数据集中的不同光强
-        A0_240 = _reconstruct_intensity(
-            y_test[:, index], modes, nZer, y_test[-1, index]
-        )
-        A1_240 = _reconstruct_intensity(
-            T_sim[:, index], modes, nZer, T_sim[-1, index]
-        )
+        A0_240 = reconstruct_from_zernike(y_test[:, index], modes, nZer, 0) + y_test[-1, index]
+        A1_240 = reconstruct_from_zernike(T_sim[:, index], modes, nZer, 0) + T_sim[-1, index]
 
         # 始终使用相同波前
         RMS_trad[index], RMS_prop[index] = run_single_test(

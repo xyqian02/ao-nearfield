@@ -28,7 +28,9 @@ from src.utils import (
     compute_mse,
     split_data,
     configure_chinese_font,
+    get_data_filename,
 )
+from scipy.ndimage import gaussian_filter1d
 
 
 # ===========================================================================
@@ -61,16 +63,6 @@ class Config:
     result_dir: str = "result"
 
 
-def _get_data_name(cfg: Config) -> str:
-    if not cfg.flag_noise and not cfg.flag_wf:
-        return f"_{cfg.n_zernike}"
-    elif cfg.flag_noise and not cfg.flag_wf:
-        return f"_{cfg.n_zernike}_noise"
-    elif cfg.flag_noise and cfg.flag_wf:
-        return f"_{cfg.n_zernike}_noise_wf"
-    return f"_{cfg.n_zernike}_wf"
-
-
 def main():
     cfg = Config()
     set_seed(cfg.base_seed)
@@ -80,7 +72,7 @@ def main():
 
     # ---- 1. 加载数据 ----
     print("加载数据...")
-    name = _get_data_name(cfg)
+    name = get_data_filename(cfg.n_zernike, cfg.flag_noise, cfg.flag_wf)
     InputData = load_mat(os.path.join(cfg.data_dir, f"InputData{name}.mat"))
     OutputData = load_mat(os.path.join(cfg.data_dir, f"OutputData{name}.mat"))
     modes = load_mat(os.path.join(cfg.accessories_dir, "modes250.mat"), "modes")
