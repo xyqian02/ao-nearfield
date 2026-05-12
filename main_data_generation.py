@@ -10,7 +10,7 @@
 3. 重构近场振幅分布(泽尼克模式线性组合)
 4. 可选叠加随机波前(相位扰动)
 5. 对每个子孔径进行衍射传播(DL) → 焦斑光强 → 加噪 → 求和
-6. 保存 InputData(n_sub × nSignal) 和 OutputData((nZer+1) × nSignal)
+6. 保存 InputData(n_samples × n_sub) 和 OutputData(n_samples × (nZer+1))
 
 MATLAB 对应: Main_Data_Generation.m
 """
@@ -116,14 +116,14 @@ def main():
     ):
         print(f"\n生成 {nZer} 阶泽尼克数据...")
 
-        # 预分配数组: OutputData = (nZer+1) × n_samples, InputData = n_sub × n_samples
-        OutputData = np.zeros((nZer + 1, cfg.n_samples))
-        InputData = np.zeros((n_sub, cfg.n_samples))
+        # 预分配数组: sklearn 约定 (n_samples, n_features)
+        OutputData = np.zeros((cfg.n_samples, nZer + 1))
+        InputData = np.zeros((cfg.n_samples, n_sub))
 
         # 随机生成泽尼克系数（高斯分布 N(0,1)）
-        temp_coeffs = np.random.randn(nZer, cfg.n_samples)
+        temp_coeffs = np.random.randn(cfg.n_samples, nZer)
         # 可选的指数衰减: for i in range(nZer): ratio=10*exp(-i/30); temp_coeffs[i]*=ratio
-        OutputData[:nZer, :] = temp_coeffs
+        OutputData[:, :nZer] = temp_coeffs
 
         for i in tqdm(range(cfg.n_samples), desc=f"  {nZer}阶泽尼克数据", unit="样本"):
 
@@ -131,11 +131,11 @@ def main():
             tempA = np.zeros(240)
             for j in range(nZer):
                 # modes[:,:,j] 是第 j+1 阶泽尼克模式 (240×240)
-                tempA = tempA + OutputData[j, i] * modes[:, :, j]
+                tempA = tempA + OutputData[i, j] * modes[:, :, j]
 
             # 保存最小值用于后续偏移
             min_val = np.min(tempA)
-            OutputData[nZer, i] = -min_val
+            OutputData[i, nZer] = -min_val
 
             # 振幅分布 (256×256)，非负
             Ampl = np.zeros((cfg.image_size, cfg.image_size))
@@ -177,7 +177,7 @@ def main():
                     )
 
                 # 记录该子孔径总光强
-                InputData[iSub, i] = np.sum(spot)
+                InputData[i, iSub] = np.sum(spot)
 
         # ---- 保存数据 ----
         suffix = get_data_filename(nZer, cfg.flag_noise, cfg.flag_wf)

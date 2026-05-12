@@ -5,6 +5,7 @@
 隐藏层神经元数下的性能，帮助选择最优超参数组合。
 
 支持多次运行取平均 ± 标准差，生成带有置信区间的平滑曲线。
+使用验证集做超参选择，测试集做最终评估。
 
 MATLAB 对应: Main_optimization.m
 """
@@ -13,20 +14,18 @@ import os
 import sys
 import numpy as np
 import matplotlib.pyplot as plt
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from tqdm import tqdm
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.model_selection import train_test_split
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from src.elm import ELM
+from src.evaluation import compute_mse, compute_rmse, compute_r2
 from src.utils import (
     load_mat,
     set_seed,
-    normalize_data,
-    apply_normalize,
-    reverse_normalize,
-    compute_mse,
-    split_data,
     configure_chinese_font,
     get_data_filename,
 )
@@ -48,13 +47,14 @@ class Config:
     flag_noise: bool = True
     flag_wf: bool = True
     test_ratio: float = 0.1
+    val_ratio: float = 0.1
 
     # ---- 搜索参数 ----
-    hidden_range: tuple = (50, 1000, 25)     # (起始, 结束, 步长)
+    hidden_range: tuple = (50, 1000, 10)     # (起始, 结束, 步长)
     n_runs: int = 5                          # 每个配置的重复次数
 
     # ---- 随机种子 ----
-    base_seed: int = 42
+    base_seed: int = 23
 
     # ---- 路径 ----
     accessories_dir: str = "accessories"
@@ -75,21 +75,31 @@ def main():
     name = get_data_filename(cfg.n_zernike, cfg.flag_noise, cfg.flag_wf)
     InputData = load_mat(os.path.join(cfg.data_dir, f"InputData{name}.mat"))
     OutputData = load_mat(os.path.join(cfg.data_dir, f"OutputData{name}.mat"))
-    modes = load_mat(os.path.join(cfg.accessories_dir, "modes250.mat"), "modes")
 
-    nZer = OutputData.shape[0] - 1
-    zer_indices = list(range(nZer)) + [OutputData.shape[0] - 1]
-    X = InputData
-    y = OutputData[zer_indices, :]
+    nZer = OutputData.shape[1] - 1
+    X = InputData                       # (n_samples, n_features)
+    y = OutputData                      # (n_samples, n_outputs)
 
-    # 数据划分与归一化
-    X_train, X_test, y_train, y_test = split_data(
-        X, y, test_ratio=cfg.test_ratio, shuffle=False
+    # ---- 2. 划分训练/验证/测试集 ----
+    X_train_val, X_test, y_train_val, y_test = train_test_split(
+        X, y, test_size=cfg.test_ratio, shuffle=False
     )
-    X_norm, y_norm, scaler_X, scaler_y = normalize_data(X_train, y_train)
-    X_test_norm = apply_normalize(X_test, scaler_X)
+    val_size = cfg.val_ratio / (1 - cfg.test_ratio)
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_train_val, y_train_val, test_size=val_size, shuffle=False
+    )
 
-    # ---- 2. 主搜索循环 ----
+    n_train = X_train.shape[0]
+    print(f"  训练: {n_train}, 验证: {X_val.shape[0]}, 测试: {X_test.shape[0]}")
+
+    # 归一化 (仅在训练集上拟合)
+    scaler_X = MinMaxScaler(feature_range=(-1, 1)).fit(X_train)
+    scaler_y = MinMaxScaler(feature_range=(-1, 1)).fit(y_train)
+    X_train_norm = scaler_X.transform(X_train)
+    y_train_norm = scaler_y.transform(y_train)
+    X_val_norm = scaler_X.transform(X_val)
+
+    # ---- 3. 主搜索循环 (验证集评估) ----
     hidden_list = list(
         range(cfg.hidden_range[0], cfg.hidden_range[1] + 1, cfg.hidden_range[2])
     )
@@ -99,30 +109,62 @@ def main():
     MSE_mean = np.zeros((n_methods, n_hidden_vals))
     MSE_std = np.zeros((n_methods, n_hidden_vals))
 
-    print(f"搜索 {n_methods} 种激活函数 × {n_hidden_vals} 个神经元数 × {cfg.n_runs} 次重复...")
+    print(f"搜索 {n_methods} 种激活函数 × {n_hidden_vals} 个神经元数 × {cfg.n_runs} 次重复 (验证集)...")
     pbar_methods = tqdm(cfg.methods, desc="优化进度", unit="方法")
     for m_idx, method in enumerate(pbar_methods):
         pbar_methods.set_postfix({"当前方法": method})
         for h_idx, n_hid in enumerate(hidden_list):
             mse_runs = np.zeros(cfg.n_runs)
             for r in range(cfg.n_runs):
-                set_seed(cfg.base_seed + r * 1000)
-                elm = ELM(n_hidden=n_hid, activation=method.lower())
-                elm.fit(X_norm, y_norm)
-                pred_norm = elm.predict(X_test_norm)
-                pred = reverse_normalize(pred_norm, scaler_y)
-                mse_runs[r] = compute_mse(y_test, pred)
+                elm = ELM(
+                    n_hidden=n_hid,
+                    activation=method.lower(),
+                    random_state=cfg.base_seed + r * 1000,
+                )
+                elm.fit(X_train_norm, y_train_norm)
+                y_val_pred_norm = elm.predict(X_val_norm)
+                y_val_pred = scaler_y.inverse_transform(y_val_pred_norm)
+                mse_runs[r] = compute_mse(y_val, y_val_pred)
             MSE_mean[m_idx, h_idx] = np.mean(mse_runs)
             MSE_std[m_idx, h_idx] = np.std(mse_runs)
 
-    # ---- 3. 绘图 (投稿级) ----
+    # ---- 4. 各方法最优神经元 → 测试集评估 ----
+    best_neus = np.zeros(n_methods, dtype=int)
+    best_val_mses = np.zeros(n_methods)
+    test_results = {}
+
+    X_train_full = np.vstack([X_train, X_val])
+    y_train_full = np.vstack([y_train, y_val])
+    X_train_full_norm = scaler_X.transform(X_train_full)
+    y_train_full_norm = scaler_y.transform(y_train_full)
+    X_test_norm = scaler_X.transform(X_test)
+
+    for m_idx, method in enumerate(cfg.methods):
+        best_idx = np.argmin(MSE_mean[m_idx])
+        best_neus[m_idx] = hidden_list[best_idx]
+        best_val_mses[m_idx] = MSE_mean[m_idx, best_idx]
+
+        elm = ELM(
+            n_hidden=int(best_neus[m_idx]),
+            activation=method.lower(),
+            random_state=cfg.base_seed,
+        )
+        elm.fit(X_train_full_norm, y_train_full_norm)
+        y_test_pred_norm = elm.predict(X_test_norm)
+        y_test_pred = scaler_y.inverse_transform(y_test_pred_norm)
+
+        test_results[method] = {
+            "mse": compute_mse(y_test, y_test_pred),
+            "rmse": compute_rmse(y_test, y_test_pred),
+            "r2": compute_r2(y_test, y_test_pred),
+            "best_n": int(best_neus[m_idx]),
+        }
+
+    # ---- 5. 绘图 (投稿级) ----
     fig, ax = plt.subplots(1, 1, figsize=(8, 5.5))
     colors = plt.cm.tab10(np.linspace(0, 1, n_methods))
 
-    best_vals = np.zeros(n_methods)
-    best_neus = np.zeros(n_methods)
     legend_handles = []
-
     for m_idx, method in enumerate(cfg.methods):
         # 高斯平滑
         mean_curve = gaussian_filter1d(MSE_mean[m_idx], sigma=2.0)
@@ -144,25 +186,22 @@ def main():
             color=colors[m_idx], linewidth=1.6, label=method,
         )
 
-        # 找最优点
+        # 标注最优点 (验证集最优)
         best_idx = np.argmin(MSE_mean[m_idx])
-        best_vals[m_idx] = MSE_mean[m_idx, best_idx]
-        best_neus[m_idx] = hidden_list[best_idx]
-
         ax.plot(
             best_neus[m_idx], mean_curve[best_idx], "p",
             color=colors[m_idx], markersize=9, markeredgecolor=colors[m_idx],
         )
         ax.text(
             best_neus[m_idx] - 60, mean_curve[best_idx] * 1.15,
-            f"N={int(best_neus[m_idx])}\nMSE={best_vals[m_idx]:.2e}",
+            f"N={int(best_neus[m_idx])}\nMSE={best_val_mses[m_idx]:.2e}",
             fontsize=9, color=colors[m_idx],
         )
         legend_handles.append(line)
 
     ax.legend(legend_handles, cfg.methods, loc="best", frameon=False)
     ax.set_xlabel("隐藏层神经元数", fontsize=13)
-    ax.set_ylabel("MSE", fontsize=13)
+    ax.set_ylabel("MSE (验证集)", fontsize=13)
     ax.set_title("不同激活函数性能对比 (均值±标准差)", fontsize=13)
     ax.set_yscale("log")
     ax.set_xlim(hidden_list[0] - 30, hidden_list[-1] + 30)
@@ -177,22 +216,29 @@ def main():
     )
     plt.show()
 
-    # ---- 4. 输出最优结果 ----
-    print("\n===== 最优结果 =====")
-    for m_idx, method in enumerate(cfg.methods):
+    # ---- 6. 输出结果 ----
+    print("\n===== 测试集最终评估 =====")
+    for method in cfg.methods:
+        r = test_results[method]
         print(
-            f"  {method}: 最优神经元数 = {int(best_neus[m_idx])}, "
-            f"MSE = {best_vals[m_idx]:.4e}"
+            f"  {method}: N={r['best_n']}, "
+            f"MSE={r['mse']:.4e}, RMSE={r['rmse']:.4e}, R²={r['r2']:.4f}"
         )
 
-    # ---- 5. 保存数据 ----
+    global_best = min(test_results, key=lambda m: test_results[m]["mse"])
+    print(f"\n  全局最优: {global_best} (测试集 MSE = {test_results[global_best]['mse']:.4e})")
+
+    # ---- 7. 保存数据 ----
     result_data = {
         "hidden_list": hidden_list,
         "MSE_mean": MSE_mean,
         "MSE_std": MSE_std,
         "best_neus": best_neus,
-        "best_vals": best_vals,
-        "methods": list(cfg.methods),
+        "best_val_mses": best_val_mses,
+        "methods": np.array(cfg.methods),
+        "test_mse": np.array([test_results[m]["mse"] for m in cfg.methods]),
+        "test_rmse": np.array([test_results[m]["rmse"] for m in cfg.methods]),
+        "test_r2": np.array([test_results[m]["r2"] for m in cfg.methods]),
     }
     np.savez(
         os.path.join(cfg.figure_data_dir, "optimization_data.npz"), **result_data

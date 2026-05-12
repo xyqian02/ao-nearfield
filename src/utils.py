@@ -1,9 +1,8 @@
 """
 工具函数模块
 
-提供数据IO（.mat文件读写）、评估指标、随机种子设置、中文字体配置等基础功能。
-使用 sklearn 的 MinMaxScaler 替代 MATLAB 的 mapminmax，
-使用 sklearn.metrics.mean_squared_error 替代 MATLAB 的 mse。
+提供数据IO（.mat文件读写）、随机种子设置、中文字体配置、
+泽尼克重构等基础功能。
 """
 
 import os
@@ -11,9 +10,6 @@ import numpy as np
 import scipy.io as sio
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import mean_squared_error
-from sklearn.model_selection import train_test_split
 
 
 def configure_chinese_font() -> None:
@@ -91,96 +87,6 @@ def save_mat(filepath: str, **kwargs) -> None:
 def set_seed(seed: int = 42) -> None:
     """设置 NumPy 随机种子，确保可重复性"""
     np.random.seed(seed)
-
-
-def normalize_data(
-    X: np.ndarray, y: np.ndarray, feature_range: tuple = (-1, 1)
-) -> tuple[np.ndarray, np.ndarray, MinMaxScaler, MinMaxScaler]:
-    """
-    对输入和输出数据进行归一化处理
-
-    参数:
-        X: 输入数据，形状 (n_features, n_samples)
-        y: 输出数据，形状 (n_outputs, n_samples)
-        feature_range: 归一化范围，默认 (-1, 1)
-
-    返回:
-        X_norm: 归一化后的输入
-        y_norm: 归一化后的输出
-        scaler_X: 输入归一化器（用于后续 apply）
-        scaler_y: 输出归一化器（用于后续 reverse）
-    """
-    scaler_X = MinMaxScaler(feature_range=feature_range)
-    scaler_y = MinMaxScaler(feature_range=feature_range)
-
-    # MinMaxScaler 期望 (n_samples, n_features)，这里数据按 (n_features, n_samples) 组织
-    # 需要转置适配，再转置回来
-    X_norm = scaler_X.fit_transform(X.T).T
-    y_norm = scaler_y.fit_transform(y.T).T
-
-    return X_norm, y_norm, scaler_X, scaler_y
-
-
-def apply_normalize(X: np.ndarray, scaler: MinMaxScaler) -> np.ndarray:
-    """对数据应用已有的归一化器"""
-    return scaler.transform(X.T).T
-
-
-def reverse_normalize(y_norm: np.ndarray, scaler: MinMaxScaler) -> np.ndarray:
-    """将归一化后的数据逆变换回原始范围"""
-    return scaler.inverse_transform(y_norm.T).T
-
-
-def compute_mse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    """
-    计算多输出样本集的平均 MSE（向量化实现）
-
-    参数:
-        y_true: 真实值，形状 (n_outputs, n_samples)
-        y_pred: 预测值，形状 (n_outputs, n_samples)
-
-    返回:
-        所有样本的平均 MSE
-    """
-    return float(np.mean((y_true - y_pred) ** 2))
-
-
-def split_data(
-    X: np.ndarray,
-    y: np.ndarray,
-    test_ratio: float = 0.1,
-    shuffle: bool = False,
-    seed: int | None = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """
-    划分训练集和测试集
-
-    参数:
-        X: 输入数据 (n_features, n_samples)
-        y: 输出数据 (n_outputs, n_samples)
-        test_ratio: 测试集比例
-        shuffle: 是否打乱数据
-        seed: 随机种子
-
-    返回:
-        X_train, X_test, y_train, y_test
-    """
-    n_samples = X.shape[1]
-    n_test = int(np.round(test_ratio * n_samples))
-
-    if shuffle:
-        # sklearn 的 train_test_split 在 feature 维度操作
-        X_train, X_test, y_train, y_test = train_test_split(
-            X.T, y.T, test_size=test_ratio, random_state=seed
-        )
-        return X_train.T, X_test.T, y_train.T, y_test.T
-    else:
-        # 不 shuffle，直接按顺序划分（与 MATLAB 原代码一致）
-        X_train = X[:, : n_samples - n_test]
-        X_test = X[:, n_samples - n_test :]
-        y_train = y[:, : n_samples - n_test]
-        y_test = y[:, n_samples - n_test :]
-        return X_train, X_test, y_train, y_test
 
 
 def circ_mask(size: int = 240) -> np.ndarray:

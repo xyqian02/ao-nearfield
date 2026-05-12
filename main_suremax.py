@@ -2,8 +2,8 @@
 泽尼克阶数影响分析主脚本
 
 分析不同泽尼克阶数 (15~250) 对 ELM 预测 MSE 的影响。
-对于每个阶数，加载对应数据，训练 ELM，搜索最优神经元数，
-记录最小 MSE，绘制 MSE 随泽尼克阶数的变化曲线。
+对于每个阶数，加载对应数据，在验证集上搜索最优神经元数，
+记录验证集最优 MSE，绘制 MSE 随泽尼克阶数的变化曲线。
 
 MATLAB 对应: Main_SureMax.m
 """
@@ -14,18 +14,16 @@ import numpy as np
 import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from tqdm import tqdm
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.model_selection import train_test_split
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from src.elm import ELM
+from src.evaluation import compute_mse
 from src.utils import (
     load_mat,
     set_seed,
-    normalize_data,
-    apply_normalize,
-    reverse_normalize,
-    compute_mse,
-    split_data,
     configure_chinese_font,
     get_data_filename,
 )
@@ -76,7 +74,7 @@ def main():
 
     print(f"分析泽尼克阶数 {zernike_orders[0]}~{zernike_orders[-1]} 对 MSE 的影响...")
     fig, ax = plt.subplots(1, 1, figsize=(8, 5))
-    plt.ion()  # 交互模式，实时更新曲线
+    plt.ion()
 
     pbar = tqdm(zernike_orders, desc="泽尼克阶数分析", unit="阶")
     for idx, NN in enumerate(pbar):
@@ -93,26 +91,30 @@ def main():
         # 加载数据
         InputData = load_mat(input_path)
         OutputData = load_mat(output_path)
-        nZer = OutputData.shape[0] - 1
+        nZer = OutputData.shape[1] - 1
 
-        zer_indices = list(range(nZer))
-        X = InputData
-        y = OutputData[zer_indices, :]
+        X = InputData                       # (n_samples, n_features)
+        y = OutputData[:, :nZer]            # (n_samples, n_outputs), 不含 offset 列
 
-        X_train, X_test, y_train, y_test = split_data(
-            X, y, test_ratio=0.1, shuffle=False
+        # 划分训练/验证集 (80/20，不需要测试集)
+        X_train, X_val, y_train, y_val = train_test_split(
+            X, y, test_size=0.2, shuffle=False
         )
-        X_norm, y_norm, scaler_X, scaler_y = normalize_data(X_train, y_train)
-        X_test_norm = apply_normalize(X_test, scaler_X)
 
-        # 搜索最优神经元数
+        scaler_X = MinMaxScaler(feature_range=(-1, 1)).fit(X_train)
+        scaler_y = MinMaxScaler(feature_range=(-1, 1)).fit(y_train)
+        X_train_norm = scaler_X.transform(X_train)
+        y_train_norm = scaler_y.transform(y_train)
+        X_val_norm = scaler_X.transform(X_val)
+
+        # 搜索最优神经元数 (验证集评估)
         best_mse = np.inf
         for n_hid in hidden_list:
-            elm = ELM(n_hidden=n_hid, activation=cfg.activation)
-            elm.fit(X_norm, y_norm)
-            pred_norm = elm.predict(X_test_norm)
-            pred = reverse_normalize(pred_norm, scaler_y)
-            mse_val = compute_mse(y_test, pred)
+            elm = ELM(n_hidden=n_hid, activation=cfg.activation, random_state=cfg.seed)
+            elm.fit(X_train_norm, y_train_norm)
+            y_val_pred_norm = elm.predict(X_val_norm)
+            y_val_pred = scaler_y.inverse_transform(y_val_pred_norm)
+            mse_val = compute_mse(y_val, y_val_pred)
             if mse_val < best_mse:
                 best_mse = mse_val
 
@@ -127,7 +129,7 @@ def main():
             "b-", linewidth=1.5,
         )
         ax.set_xlabel("泽尼克阶数", fontsize=13)
-        ax.set_ylabel("MSE", fontsize=13)
+        ax.set_ylabel("MSE (验证集最优)", fontsize=13)
         ax.set_title("MSE 随泽尼克阶数的变化", fontsize=13)
         ax.grid(True, alpha=0.3)
         plt.pause(0.01)
@@ -141,11 +143,11 @@ def main():
         "b-", linewidth=1.5,
     )
     ax.set_xlabel("泽尼克阶数", fontsize=13)
-    ax.set_ylabel("MSE", fontsize=13)
+    ax.set_ylabel("MSE (验证集最优)", fontsize=13)
     ax.set_title("MSE 随泽尼克阶数的变化", fontsize=13)
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.ioff()  # 恢复阻塞模式
+    plt.ioff()
     plt.savefig(os.path.join(cfg.result_dir, "mse_vs_zernike_order.png"), dpi=150)
     plt.show()
 

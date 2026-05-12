@@ -19,19 +19,18 @@ import numpy as np
 import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from tqdm import tqdm
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.model_selection import train_test_split
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from src.optics import Optics
 from src.elm import ELM
 from src.hartmann import HartmannSensor
+from src.evaluation import compute_mse, compute_rmse, compute_r2, compute_rms_wavefront, compute_pv_wavefront
 from src.utils import (
     load_mat,
     set_seed,
-    normalize_data,
-    apply_normalize,
-    reverse_normalize,
-    split_data,
     circ_mask,
     configure_chinese_font,
     get_data_filename,
@@ -71,10 +70,10 @@ class Config:
     noise_sigma: float = 0.5
 
     # ---- 测试样本索引 ----
-    test_index: int = 21
+    test_index: int = 10
 
     # ---- 随机种子 ----
-    seed: int = 1
+    seed: int = 23
 
     # ---- 路径 ----
     accessories_dir: str = "accessories"
@@ -97,44 +96,64 @@ def main():
     OutputData = load_mat(os.path.join(cfg.data_dir, f"OutputData{name}.mat"))
 
     n_sub = subcfg.shape[1]
-    nZer = OutputData.shape[0] - 1
+    nZer = OutputData.shape[1] - 1
     print(f"  子孔径数: {n_sub}, 泽尼克阶数: {nZer}")
 
     # ---- 2. ELM 训练 ----
     print("训练 ELM 模型...")
-    zer_indices = list(range(nZer)) + [OutputData.shape[0] - 1]
-    X = InputData
-    y = OutputData[zer_indices, :]
+    X = InputData                       # (n_samples, n_features)
+    y = OutputData                      # (n_samples, n_outputs)
 
-    X_train, X_test, y_train, y_test = split_data(X, y, test_ratio=0.1, shuffle=False)
-    X_norm, y_norm, scaler_X, scaler_y = normalize_data(X_train, y_train)
-    X_test_norm = apply_normalize(X_test, scaler_X)
+    # 划分训练/验证/测试集
+    X_train_val, X_test, y_train_val, y_test = train_test_split(
+        X, y, test_size=0.1, shuffle=False
+    )
+    val_size = 0.1 / 0.9  # 10% val from remaining
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_train_val, y_train_val, test_size=val_size, shuffle=False
+    )
 
-    # 搜索最优隐藏层神经元
+    scaler_X = MinMaxScaler(feature_range=(-1, 1)).fit(X_train)
+    scaler_y = MinMaxScaler(feature_range=(-1, 1)).fit(y_train)
+    X_train_norm = scaler_X.transform(X_train)
+    y_train_norm = scaler_y.transform(y_train)
+    X_val_norm = scaler_X.transform(X_val)
+
+    # 搜索最优隐藏层神经元 (验证集评估)
     if cfg.n_hidden is None:
         hidden_list = list(range(100, 1550, 50))
         mse_list = np.zeros(len(hidden_list))
         for idx, n_hid in enumerate(
             tqdm(hidden_list, desc="  搜索最优隐藏层神经元数", unit="个")
         ):
-            elm_tmp = ELM(n_hidden=n_hid, activation=cfg.activation)
-            elm_tmp.fit(X_norm, y_norm)
-            pred_norm = elm_tmp.predict(X_test_norm)
-            pred_tmp = reverse_normalize(pred_norm, scaler_y)
-            mse_list[idx] = np.mean([
-                np.mean((pred_tmp[:, k] - y_test[:, k]) ** 2)
-                for k in range(y_test.shape[1])
-            ])
+            elm_tmp = ELM(n_hidden=n_hid, activation=cfg.activation, random_state=cfg.seed)
+            elm_tmp.fit(X_train_norm, y_train_norm)
+            y_val_pred_norm = elm_tmp.predict(X_val_norm)
+            y_val_pred = scaler_y.inverse_transform(y_val_pred_norm)
+            mse_list[idx] = compute_mse(y_val, y_val_pred)
         best_hidden = hidden_list[np.argmin(mse_list)]
-        print(f"  最优神经元数: {best_hidden}, MSE={np.min(mse_list):.4e}")
+        print(f"  最优神经元数: {best_hidden}, 验证集 MSE={np.min(mse_list):.4e}")
     else:
         best_hidden = cfg.n_hidden
 
-    # 训练最终模型
-    elm = ELM(n_hidden=best_hidden, activation=cfg.activation)
-    elm.fit(X_norm, y_norm)
-    pred_norm = elm.predict(X_test_norm)
-    T_sim = reverse_normalize(pred_norm, scaler_y)
+    # 在训练+验证集上训练最终模型
+    X_train_full = np.vstack([X_train, X_val])
+    y_train_full = np.vstack([y_train, y_val])
+    X_train_full_norm = scaler_X.transform(X_train_full)
+    y_train_full_norm = scaler_y.transform(y_train_full)
+
+    X_test_norm = scaler_X.transform(X_test)
+
+    elm = ELM(n_hidden=best_hidden, activation=cfg.activation, random_state=cfg.seed)
+    elm.fit(X_train_full_norm, y_train_full_norm)
+    T_sim_norm = elm.predict(X_test_norm)
+    T_sim = scaler_y.inverse_transform(T_sim_norm)  # (n_test, n_outputs)
+
+    # 评估
+    test_mse = compute_mse(y_test, T_sim)
+    test_rmse = compute_rmse(y_test, T_sim)
+    test_r2 = compute_r2(y_test, T_sim)
+    print(f"  测试集 MSE = {test_mse:.4e}, RMSE = {test_rmse:.4e}, R² = {test_r2:.4f}")
 
     # ---- 3. 初始化光学系统和哈特曼传感器 ----
     optics = Optics(
@@ -160,7 +179,7 @@ def main():
     print(f"  Z2S 形状: {Z2S.shape}")
 
     # ---- 6. 测试: 随机波前 → 对比两种复原方法 ----
-    idx = min(cfg.test_index, y_test.shape[1] - 1)
+    idx = min(cfg.test_index, y_test.shape[0] - 1)
     print(f"\n测试样本 #{idx}:")
 
     # 6.1 生成随机波前 (不含前2阶 piston/tilt)
@@ -176,8 +195,8 @@ def main():
     np.random.seed(2)
     A0_mat = np.zeros(240)
     for i in range(nZer):
-        A0_mat = A0_mat + y_test[i, idx] * modes[:, :, i]
-    A0_mat = A0_mat + y_test[-1, idx]  # 最小值偏移
+        A0_mat = A0_mat + y_test[idx, i] * modes[:, :, i]
+    A0_mat = A0_mat + y_test[idx, -1]  # 最小值偏移
 
     # 6.3 传统方法: 真实光强 + 波前 → 测量斜率 → 复原
     IntensityMat = np.zeros_like(mask)
@@ -191,8 +210,8 @@ def main():
     A1_mat = np.zeros(240)
     for i in range(nZer):
         if i < nZer:
-            A1_mat = A1_mat + T_sim[i, idx] * modes[:, :, i]
-    A1_mat = A1_mat + T_sim[-1, idx]
+            A1_mat = A1_mat + T_sim[idx, i] * modes[:, :, i]
+    A1_mat = A1_mat + T_sim[idx, -1]
 
     # ELM预测光强单独入射
     IntensityMat_R = np.zeros_like(mask)
@@ -218,12 +237,6 @@ def main():
     plt.tight_layout()
     plt.savefig(os.path.join(cfg.result_dir, "coefficients_comparison.png"), dpi=150)
     plt.show()
-
-    # 波前残差计算 RMS 和 PV
-    residual_trad = np.std(np.abs(recoe[2:] - coe[2:]))
-    residual_proposed = np.std(np.abs(recoeR[2:] - coe[2:]))
-    print(f"  传统方法 RMS 残差: {residual_trad:.4f}")
-    print(f"  本方法 RMS 残差:   {residual_proposed:.4f}")
 
     # 重构波前分布图
     wf_0 = np.zeros(240)  # 真实波前
@@ -258,13 +271,18 @@ def main():
     plt.savefig(os.path.join(cfg.result_dir, "wavefront_comparison.png"), dpi=150)
     plt.show()
 
-    # 残差图
+    # 残差图 — 使用统一的波前 RMS/PV 计算
+    wl = cfg.wavelength
+    rms_trad = compute_rms_wavefront(wf_1, wf_0, wl, mask_240)
+    pv_trad = compute_pv_wavefront(wf_1, wf_0, wl, mask_240)
+    rms_prop = compute_rms_wavefront(wf_r, wf_0, wl, mask_240)
+    pv_prop = compute_pv_wavefront(wf_r, wf_0, wl, mask_240)
+
+    print(f"  传统方法: RMS ≈ {rms_trad:.4f}λ, PV ≈ {pv_trad:.4f}λ")
+    print(f"  本方法:   RMS ≈ {rms_prop:.4f}λ, PV ≈ {pv_prop:.4f}λ")
+
     diff_trad = (wf_1 - wf_0) * mask_240
     diff_prop = (wf_r - wf_0) * mask_240
-    rms_trad = np.std(diff_trad[diff_trad != 0]) / (2 * np.pi)
-    pv_trad = (np.max(diff_trad) - np.min(diff_trad)) / (2 * np.pi)
-    rms_prop = np.std(diff_prop[diff_prop != 0]) / (2 * np.pi)
-    pv_prop = (np.max(diff_prop) - np.min(diff_prop)) / (2 * np.pi)
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     im3 = axes[0].imshow(diff_trad, cmap="jet", vmin=-vlim, vmax=vlim)

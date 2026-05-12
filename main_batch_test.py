@@ -20,19 +20,18 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from tqdm import tqdm
 from typing import Callable
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.model_selection import train_test_split
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from src.optics import Optics
 from src.elm import ELM
 from src.hartmann import HartmannSensor
+from src.evaluation import compute_rms_wavefront
 from src.utils import (
     load_mat,
     set_seed,
-    normalize_data,
-    apply_normalize,
-    reverse_normalize,
-    split_data,
     configure_chinese_font,
     get_data_filename,
     reconstruct_from_zernike,
@@ -65,7 +64,7 @@ class Config:
 
     # ---- ELM 参数 ----
     activation: str = "softplus"
-    n_hidden: int = 500
+    n_hidden: int = 625
 
     # ---- 噪声 ----
     noise_sigma: float = 0.5
@@ -74,7 +73,7 @@ class Config:
     n_batch_samples: int | None = None  # None=全部测试集
 
     # ---- 随机种子 ----
-    seed: int = 10
+    seed: int = 23
 
     # ---- 路径 ----
     accessories_dir: str = "accessories"
@@ -105,19 +104,6 @@ MODE_META = {
 
 
 # ===========================================================================
-# 辅助函数
-# ===========================================================================
-def _rms_wavefront_lambda(
-    wf_pred: np.ndarray,
-    wf_true: np.ndarray,
-    wavelength: float,
-) -> float:
-    """计算波前残差的 RMS 值 (λ 单位)"""
-    residual = wf_pred - wf_true
-    return float(np.std(residual) / (2 * np.pi) * wavelength * 1e3)
-
-
-# ===========================================================================
 # 系统初始化 (所有模式共享)
 # ===========================================================================
 def setup_system(cfg: Config) -> dict:
@@ -142,26 +128,28 @@ def setup_system(cfg: Config) -> dict:
     OutputData = load_mat(os.path.join(cfg.data_dir, f"OutputData{name}.mat"))
 
     n_sub = subcfg.shape[1]
-    nZer = OutputData.shape[0] - 1
+    nZer = OutputData.shape[1] - 1
     print(f"  子孔径数: {n_sub}, 泽尼克阶数: {nZer}")
     print(f"  输入数据: {InputData.shape}, 输出数据: {OutputData.shape}")
 
     # ---- 数据划分与 ELM 训练 ----
-    zer_indices = list(range(nZer)) + [OutputData.shape[0] - 1]
-    X = InputData
-    y = OutputData[zer_indices, :]
+    X = InputData                       # (n_samples, n_features)
+    y = OutputData                      # (n_samples, n_outputs)
 
-    X_train, X_test, y_train, y_test = split_data(
-        X, y, test_ratio=0.1, shuffle=False
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.1, shuffle=False
     )
-    X_norm, y_norm, scaler_X, scaler_y = normalize_data(X_train, y_train)
-    X_test_norm = apply_normalize(X_test, scaler_X)
+    scaler_X = MinMaxScaler(feature_range=(-1, 1)).fit(X_train)
+    scaler_y = MinMaxScaler(feature_range=(-1, 1)).fit(y_train)
+    X_train_norm = scaler_X.transform(X_train)
+    y_train_norm = scaler_y.transform(y_train)
+    X_test_norm = scaler_X.transform(X_test)
 
     print(f"  训练 ELM (N={cfg.n_hidden}, activation={cfg.activation})...")
-    elm = ELM(n_hidden=cfg.n_hidden, activation=cfg.activation)
-    elm.fit(X_norm, y_norm)
-    pred_norm = elm.predict(X_test_norm)
-    T_sim = reverse_normalize(pred_norm, scaler_y)  # ELM预测系数
+    elm = ELM(n_hidden=cfg.n_hidden, activation=cfg.activation, random_state=cfg.seed)
+    elm.fit(X_train_norm, y_train_norm)
+    T_sim_norm = elm.predict(X_test_norm)
+    T_sim = scaler_y.inverse_transform(T_sim_norm)  # (n_test, n_outputs)
 
     # ---- 哈特曼传感器初始化与标定 ----
     optics = Optics(
@@ -185,7 +173,7 @@ def setup_system(cfg: Config) -> dict:
     Recon = np.linalg.pinv(Z2S)
 
     # 计算测试样本数
-    n_test = X_test.shape[1]
+    n_test = X_test.shape[0]
     n_batch = min(cfg.n_batch_samples or n_test, n_test)
 
     return {
@@ -250,8 +238,8 @@ def run_single_test(
     wf_1 = reconstruct_from_zernike(recoe, modes, cfg.n_wf_modes - 2, 2)
     wf_r = reconstruct_from_zernike(recoeR, modes, cfg.n_wf_modes - 2, 2)
 
-    rms_trad = _rms_wavefront_lambda(wf_1, wf_0, cfg.wavelength)
-    rms_prop = _rms_wavefront_lambda(wf_r, wf_0, cfg.wavelength)
+    rms_trad = compute_rms_wavefront(wf_1, wf_0, cfg.wavelength)
+    rms_prop = compute_rms_wavefront(wf_r, wf_0, cfg.wavelength)
 
     return rms_trad, rms_prop
 
@@ -280,8 +268,8 @@ def test_random_combination(cfg: Config, ctx: dict) -> tuple[np.ndarray, np.ndar
         coe = cfg.wf_coeff_std * np.random.randn(cfg.n_wf_modes)
 
         # 数据集中的光强 (每个样本不同)
-        A0_240 = reconstruct_from_zernike(y_test[:, index], modes, nZer, 0) + y_test[-1, index]
-        A1_240 = reconstruct_from_zernike(T_sim[:, index], modes, nZer, 0) + T_sim[-1, index]
+        A0_240 = reconstruct_from_zernike(y_test[index, :nZer], modes, nZer, 0) + y_test[index, -1]
+        A1_240 = reconstruct_from_zernike(T_sim[index, :nZer], modes, nZer, 0) + T_sim[index, -1]
 
         RMS_trad[index], RMS_prop[index] = run_single_test(
             ctx["hs"], ctx["mask"], ctx["Recon"], cfg,
@@ -310,8 +298,8 @@ def test_fixed_intensity(cfg: Config, ctx: dict) -> tuple[np.ndarray, np.ndarray
 
     # 提取固定光强分布 (使用测试集第一个样本)
     fixed_idx = 0
-    A0_fixed = reconstruct_from_zernike(y_test[:, fixed_idx], modes, nZer, 0) + y_test[-1, fixed_idx]
-    A1_fixed = reconstruct_from_zernike(T_sim[:, fixed_idx], modes, nZer, 0) + T_sim[-1, fixed_idx]
+    A0_fixed = reconstruct_from_zernike(y_test[fixed_idx, :nZer], modes, nZer, 0) + y_test[fixed_idx, -1]
+    A1_fixed = reconstruct_from_zernike(T_sim[fixed_idx, :nZer], modes, nZer, 0) + T_sim[fixed_idx, -1]
     print(f"  固定光强取自测试样本 #{fixed_idx}")
 
     RMS_trad = np.zeros(n_batch)
@@ -356,8 +344,8 @@ def test_fixed_wavefront(cfg: Config, ctx: dict) -> tuple[np.ndarray, np.ndarray
 
     for index in tqdm(range(n_batch), desc="固定波前测试", unit="样本"):
         # 数据集中的不同光强
-        A0_240 = reconstruct_from_zernike(y_test[:, index], modes, nZer, 0) + y_test[-1, index]
-        A1_240 = reconstruct_from_zernike(T_sim[:, index], modes, nZer, 0) + T_sim[-1, index]
+        A0_240 = reconstruct_from_zernike(y_test[index, :nZer], modes, nZer, 0) + y_test[index, -1]
+        A1_240 = reconstruct_from_zernike(T_sim[index, :nZer], modes, nZer, 0) + T_sim[index, -1]
 
         # 始终使用相同波前
         RMS_trad[index], RMS_prop[index] = run_single_test(
@@ -472,7 +460,7 @@ def parse_args() -> argparse.Namespace:
         choices=["rc", "fi", "fw"],
         default="fw",
         nargs="?",
-        help="测试模式: rc=随机组合, fi=固定光强, fw=固定波前 (默认: rc)",
+        help="测试模式: rc=随机组合, fi=固定光强, fw=固定波前",
     )
     return parser.parse_args()
 

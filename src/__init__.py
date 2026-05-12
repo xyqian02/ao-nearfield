@@ -6,12 +6,12 @@
 """
 
 from .optics import Optics
-from .elm import ELM, BaseModel
+from .elm import ELM
 from .hartmann import HartmannSensor, create_subcfg, create_sub_valid
+from .evaluation import compute_mse, compute_rmse, compute_r2, compute_rms_wavefront, compute_pv_wavefront
 from .utils import (
     load_mat,
     save_mat,
-    compute_mse,
     set_seed,
     configure_chinese_font,
     get_data_filename,
@@ -23,13 +23,16 @@ from .utils import (
 __all__ = [
     "Optics",
     "ELM",
-    "BaseModel",
     "HartmannSensor",
     "create_subcfg",
     "create_sub_valid",
     "load_mat",
     "save_mat",
     "compute_mse",
+    "compute_rmse",
+    "compute_r2",
+    "compute_rms_wavefront",
+    "compute_pv_wavefront",
     "set_seed",
     "configure_chinese_font",
     "get_data_filename",
