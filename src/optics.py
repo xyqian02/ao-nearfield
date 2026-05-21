@@ -95,25 +95,43 @@ class Optics:
         """
         将泽尼克模式号转换为径向阶数 n 和角向频率 m (Noll 索引方案)
 
+        Noll 排序规则: n 递增, 同 n 内 |m| 递增, m>0 为 cos, m<0 为 sin.
+
         参数:
             mode: 泽尼克模式号 (从1开始，1=piston)
 
         返回:
-            (n, m): 径向阶数和角向频率
-
-        MATLAB 对应: nmZern.m
+            (n, m): 径向阶数 n 和带符号角向频率 m
+                    m=0  无角向分量(piston/defocus/spherical)
+                    m>0  cos(|m|θ) 偶模态
+                    m<0  sin(|m|θ) 奇模态
         """
-        csum = np.cumsum(np.arange(1, mode + 1))
-        n = int(np.sum(csum < mode))
+        # 由 Noll 索引反推径向阶数: n = ceil((-3 + sqrt(9+8*(j-1))) / 2)
+        n = int(np.ceil((-3.0 + np.sqrt(9.0 + 8.0 * (mode - 1))) / 2.0))
+        # 前 n 个径向阶 (0..n-1) 的模式总数 = n(n+1)/2
+        prev_count = n * (n + 1) // 2
+        if mode <= prev_count:
+            n -= 1
+            prev_count = n * (n + 1) // 2
 
-        if n == 0:
-            m = 0
-        elif n % 2 == 0:
-            m = int(np.fix((mode - csum[n]) / 2)) * 2
-        else:
-            m = int(np.round((mode - csum[n]) / 2)) * 2 - 1
+        k = mode - prev_count - 1  # 当前 n 内的 0-based 偏移
 
-        return n, m
+        # 同 n 内 |m| 递增: n偶→[0, 2, 4, ..., n], n奇→[1, 3, 5, ..., n]
+        m_vals = list(range(0 if n % 2 == 0 else 1, n + 1, 2))
+
+        for m_val in m_vals:
+            if m_val == 0:
+                if k == 0:
+                    return n, 0
+                k -= 1
+            else:
+                if k == 0:
+                    return n, m_val   # cos(|m|θ)
+                if k == 1:
+                    return n, -m_val  # sin(|m|θ)
+                k -= 2
+
+        raise ValueError(f"mode={mode} 超出有效范围")
 
     @staticmethod
     def zernike(mode: int, Na: int, pupil: np.ndarray | None = None) -> np.ndarray:
@@ -155,12 +173,12 @@ class Optics:
             R = R + coeff * r ** (n - 2 * s)
             s = s + 1
 
-        # 角向部分 + 归一化因子
+        # 角向部分 + 归一化因子 (m 符号编码 cos/sin，见 _nm_zern)
         if m == 0:
             z = np.sqrt(n + 1) * R
-        elif mode % 2 == 0:  # 偶模式 → cos(mθ)
-            z = np.sqrt(2 * (n + 1)) * R * np.cos(abs(m) * th)
-        else:  # 奇模式 → sin(mθ)
+        elif m > 0:  # cos(|m|θ)
+            z = np.sqrt(2 * (n + 1)) * R * np.cos(m * th)
+        else:  # m < 0 → sin(|m|θ)
             z = np.sqrt(2 * (n + 1)) * R * np.sin(abs(m) * th)
 
         # 光瞳截断
@@ -196,23 +214,22 @@ class Optics:
     @staticmethod
     def pupil_circle(N: int) -> np.ndarray:
         """
-        创建圆形光瞳函数
+        创建圆形光瞳函数，与 MATLAB Pupil.m 数值一致
 
-        在 N×N 区域中心生成单位圆，圆内为1，圆外为0。
+        MATLAB: center = ceil(N/2); radius = ceil(N/2);
+                distance = hypot(row - center, col - center)
+        Python: row = Y + 1, col = X + 1  (MATLAB 1-based → Python 0-based)
 
         参数:
             N: 输出矩阵边长
 
         返回:
             N × N 的二值光瞳矩阵
-
-        MATLAB 对应: Pupil.m
         """
-        # 向量化实现，比逐像素循环快 50-100 倍
+        center = int(np.ceil(N / 2))
+        radius = center
         Y, X = np.ogrid[:N, :N]
-        center = N / 2.0
-        radius = N / 2.0
-        distance = np.hypot(X + 0.5 - center, Y + 0.5 - center)
+        distance = np.hypot(X + 1 - center, Y + 1 - center)
         return (distance <= radius).astype(np.float64)
 
     @staticmethod

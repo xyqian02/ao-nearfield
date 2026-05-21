@@ -25,12 +25,12 @@ def create_sub_valid(
     """
     计算有效子孔径掩模矩阵
 
-    判断每个子孔径位置处近场能量是否足够，只有能量超过阈值的
-    子孔径才被视为"有效"，参与后续计算。
+    子孔径网格以图像/光束中心均匀分布，判断每个子孔径位置处
+    近场能量是否足够，只有能量超过阈值的才被视为"有效"。
 
     参数:
-        n_dim: 子孔径阵列维度 (如 10 表示 10×10 阵列)
-        near_field: 近场分布矩阵 (已归一化)
+        n_dim: 子孔径阵列维度 (如 12 表示 12×12 阵列)
+        near_field: 近场分布矩阵 (光束掩模)
         n_sub_pix: 每个子孔径的像素数 (边长)
         ratio: 有效子孔径能量阈值 (0~1)，默认 0.5
 
@@ -41,20 +41,23 @@ def create_sub_valid(
     """
     sub_valid = np.zeros((n_dim, n_dim))
     n_pixel = near_field.shape[0]
+    total_span = n_dim * n_sub_pix
 
-    # 如果子孔径阵列超出图像，创建更大的掩模
-    if n_dim * n_sub_pix > n_pixel:
-        mask = np.zeros((n_dim * n_sub_pix, n_dim * n_sub_pix))
-        st = int(np.round((n_dim * n_sub_pix - n_pixel) / 2))
+    # 子孔径网格居中: 光束圆域中心 = 图像中心 = 子孔径阵列中心
+    if total_span > n_pixel:
+        mask = np.zeros((total_span, total_span))
+        st = int(np.round((total_span - n_pixel) / 2))
         mask[st : st + n_pixel, st : st + n_pixel] = near_field
+        offset = 0
     else:
         mask = near_field
+        offset = (n_pixel - total_span) // 2
 
     for i in range(n_dim):
         for j in range(n_dim):
-            x = i * n_sub_pix
-            y = j * n_sub_pix
-            temp = mask[x : x + n_sub_pix, y : y + n_sub_pix]
+            y = offset + i * n_sub_pix
+            x = offset + j * n_sub_pix
+            temp = mask[y : y + n_sub_pix, x : x + n_sub_pix]
             if np.sum(temp) >= n_sub_pix * n_sub_pix * ratio:
                 sub_valid[i, j] = 1
 
@@ -69,7 +72,8 @@ def create_subcfg(
     """
     根据有效子孔径掩模生成子孔径坐标矩阵
 
-    坐标以图像中心为原点，每个子孔径的坐标为其左下角像素位置。
+    坐标以子孔径阵列中心（= 图像/光束中心）为原点，
+    每个子孔径的坐标为其左下角像素位置。
 
     参数:
         sub_valid_mat: 有效子孔径掩模矩阵 (由 create_sub_valid 生成)
@@ -87,13 +91,16 @@ def create_subcfg(
     n_sub = int(np.sum(sub_valid_mat))
     subcfg = np.zeros((2, n_sub))
 
+    # 子孔径网格中心 = 图像中心，坐标以阵列中心对称分布
+    cy = (W * n_sub_pix) / 2.0
+    cx = (H * n_sub_pix) / 2.0
+
     num = 0
     for i in range(W):
         for j in range(H):
             if sub_valid_mat[i, j]:
-                # (i-1)*nSubPix - nPixel/2  (MATLAB 1-based → Python 0-based: i*nSubPix - nPixel/2)
-                subcfg[0, num] = i * n_sub_pix - n_pixel / 2  # y 坐标
-                subcfg[1, num] = j * n_sub_pix - n_pixel / 2  # x 坐标
+                subcfg[0, num] = i * n_sub_pix - cy  # y 坐标
+                subcfg[1, num] = j * n_sub_pix - cx  # x 坐标
                 num += 1
 
     return subcfg
@@ -288,7 +295,8 @@ class HartmannSensor:
         Z2S 矩阵的第 k 行对应第 k 阶泽尼克模式在各子孔径的斜率响应。
 
         参数:
-            modes: 泽尼克模式矩阵，形状 (n_modes, Na, Na)
+            modes: 泽尼克模式矩阵，形状 (H, W, n_modes) 或 (n_modes, H, W)
+                   (N,H,W) 布局会自动转置为 (H,W,N)
             mask: 近场掩模矩阵
             n_wf_modes: 用于波前传感的泽尼克阶数
             noise_sigma: 噪声标准差
@@ -298,6 +306,10 @@ class HartmannSensor:
         """
         if self.origin_hs is None:
             raise RuntimeError("请先调用 calibrate() 进行标定")
+
+        # 自动检测 modes 布局: (N,H,W) → (H,W,N)
+        if modes.ndim == 3 and modes.shape[0] < modes.shape[1] and modes.shape[0] < modes.shape[2]:
+            modes = np.transpose(modes, (1, 2, 0))
 
         n_pixels = self.optics.n_pixels
         Z2S = np.zeros((n_wf_modes, 2 * self.n_sub))

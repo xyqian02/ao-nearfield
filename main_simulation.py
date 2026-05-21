@@ -17,13 +17,13 @@ import os
 import sys
 import numpy as np
 import matplotlib.pyplot as plt
-from dataclasses import dataclass
 from tqdm import tqdm
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import train_test_split
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from configs import get_config
 from src.optics import Optics
 from src.elm import ELM
 from src.hartmann import HartmannSensor
@@ -31,84 +31,42 @@ from src.evaluation import compute_mse, compute_rmse, compute_r2, compute_rms_wa
 from src.utils import (
     load_mat,
     set_seed,
-    circ_mask,
     configure_chinese_font,
     get_data_filename,
     reconstruct_from_zernike,
-    create_embedded_mask,
+    load_accessories,
+    generate_mask,
 )
 
 
-# ===========================================================================
-# 参数配置
-# ===========================================================================
-@dataclass
-class Config:
-    """完整仿真参数"""
-
-    # ---- 光学系统参数 ----
-    wavelength: float = 1.064e-3
-    focal_length: float = 12.0              # 微透镜焦距 (mm) - 与 MATLAB 一致
-    pixel_pitch: float = 14e-3
-    sub_ap_pixels: int = 20
-    image_size: int = 256
-
-    # ---- 数据参数 ----
-    n_zernike_amp: int = 25                 # 光强分布泽尼克阶数 (AN)
-    flag_noise: bool = True
-    flag_wf: bool = True
-
-    # ---- 波前参数 ----
-    n_wf_modes: int = 15                    # 波前泽尼克阶数 (WN)
-    wf_coeff_std: float = 0.2
-
-    # ---- ELM 参数 ----
-    activation: str = "softplus"
-    n_hidden: int | None = None             # None=自动搜索
-
-    # ---- 噪声 ----
-    noise_sigma: float = 0.5
-
-    # ---- 测试样本索引 ----
-    test_index: int = 10
-
-    # ---- 随机种子 ----
-    seed: int = 23
-
-    # ---- 路径 ----
-    accessories_dir: str = "accessories"
-    data_dir: str = "data"
-    result_dir: str = "result"
-
-
 def main():
-    cfg = Config()
+    cfg = get_config()
     set_seed(cfg.seed)
     configure_chinese_font()
     os.makedirs(cfg.result_dir, exist_ok=True)
+    IS = cfg.image_size
 
     # ---- 1. 加载数据 ----
     print("加载数据...")
-    name = get_data_filename(cfg.n_zernike_amp, cfg.flag_noise, cfg.flag_wf)
-    subcfg = load_mat(os.path.join(cfg.accessories_dir, "Subcfg.mat"), "Subcfg")
-    modes = load_mat(os.path.join(cfg.accessories_dir, "modes250.mat"), "modes")
+    name = get_data_filename(cfg)
+    subcfg, modes = load_accessories(cfg)
     InputData = load_mat(os.path.join(cfg.data_dir, f"InputData{name}.mat"))
     OutputData = load_mat(os.path.join(cfg.data_dir, f"OutputData{name}.mat"))
 
     n_sub = subcfg.shape[1]
-    nZer = OutputData.shape[1] - 1
-    print(f"  子孔径数: {n_sub}, 泽尼克阶数: {nZer}")
+    n_amp = OutputData.shape[1] - 1
+    print(f"  子孔径数: {n_sub}, 光强泽尼克阶数: {n_amp}")
+    print(f"  图像尺寸: {IS}×{IS}")
 
     # ---- 2. ELM 训练 ----
     print("训练 ELM 模型...")
-    X = InputData                       # (n_samples, n_features)
-    y = OutputData                      # (n_samples, n_outputs)
+    X = InputData
+    y = OutputData
 
-    # 划分训练/验证/测试集
     X_train_val, X_test, y_train_val, y_test = train_test_split(
-        X, y, test_size=0.1, shuffle=False
+        X, y, test_size=cfg.test_ratio, shuffle=False
     )
-    val_size = 0.1 / 0.9  # 10% val from remaining
+    val_size = cfg.val_ratio / (1 - cfg.test_ratio)
     X_train, X_val, y_train, y_val = train_test_split(
         X_train_val, y_train_val, test_size=val_size, shuffle=False
     )
@@ -119,7 +77,7 @@ def main():
     y_train_norm = scaler_y.transform(y_train)
     X_val_norm = scaler_X.transform(X_val)
 
-    # 搜索最优隐藏层神经元 (验证集评估)
+    # 搜索最优隐藏层神经元
     if cfg.n_hidden is None:
         hidden_list = list(range(100, 1550, 50))
         mse_list = np.zeros(len(hidden_list))
@@ -136,7 +94,6 @@ def main():
     else:
         best_hidden = cfg.n_hidden
 
-    # 在训练+验证集上训练最终模型
     X_train_full = np.vstack([X_train, X_val])
     y_train_full = np.vstack([y_train, y_val])
     X_train_full_norm = scaler_X.transform(X_train_full)
@@ -147,9 +104,8 @@ def main():
     elm = ELM(n_hidden=best_hidden, activation=cfg.activation, random_state=cfg.seed)
     elm.fit(X_train_full_norm, y_train_full_norm)
     T_sim_norm = elm.predict(X_test_norm)
-    T_sim = scaler_y.inverse_transform(T_sim_norm)  # (n_test, n_outputs)
+    T_sim = scaler_y.inverse_transform(T_sim_norm)
 
-    # 评估
     test_mse = compute_mse(y_test, T_sim)
     test_rmse = compute_rmse(y_test, T_sim)
     test_r2 = compute_r2(y_test, T_sim)
@@ -160,12 +116,11 @@ def main():
         wavelength=cfg.wavelength,
         pixel_pitch=cfg.pixel_pitch,
         focal_length=cfg.focal_length,
-        n_pixels=cfg.image_size,
+        n_pixels=IS,
         sub_ap_pixels=cfg.sub_ap_pixels,
     )
     hs = HartmannSensor(subcfg, optics)
-
-    mask = create_embedded_mask(cfg.image_size, 240)
+    mask = generate_mask(cfg)
 
     # ---- 4. 哈特曼传感器标定 (平面波) ----
     print("哈特曼传感器标定 (平面波)...")
@@ -173,65 +128,53 @@ def main():
     print("  标定完成")
 
     # ---- 5. 构建斜率响应矩阵 Z2S ----
-    print(f"构建斜率响应矩阵 (前{cfg.n_wf_modes}阶泽尼克)...")
-    Z2S = hs.build_response_matrix(modes, mask, cfg.n_wf_modes, noise_sigma=cfg.noise_sigma)
-    Recon = np.linalg.pinv(Z2S)  # 波前复原矩阵 (2S, N)
+    n_wf = cfg.n_wf_modes
+    print(f"构建斜率响应矩阵 ({n_wf}阶泽尼克)...")
+    Z2S = hs.build_response_matrix(modes, mask, n_wf, noise_sigma=cfg.noise_sigma)
+    Recon = np.linalg.pinv(Z2S)
     print(f"  Z2S 形状: {Z2S.shape}")
 
     # ---- 6. 测试: 随机波前 → 对比两种复原方法 ----
-    idx = min(cfg.test_index, y_test.shape[0] - 1)
+    idx = min(cfg.batch_test_index, y_test.shape[0] - 1)
     print(f"\n测试样本 #{idx}:")
 
-    # 6.1 生成随机波前 (不含前2阶 piston/tilt)
+    wf_skip = cfg.wf_skip_count
+
+    # 6.1 生成随机波前
     np.random.seed(21)
-    coe = cfg.wf_coeff_std * np.random.randn(cfg.n_wf_modes)
-    wf = np.zeros((cfg.image_size, cfg.image_size))
-    tempW = np.zeros(240)
-    for i in range(2, cfg.n_wf_modes):  # 从第3阶开始 (跳过piston和tilt)
-        tempW = tempW + coe[i] * modes[:, :, i]
-    wf[8:248, 8:248] = tempW
+    coe = cfg.wf_coeff_std * np.random.randn(n_wf)
+    # 将跳过的低阶模式系数置零
+    coe[:wf_skip] = 0.0
+    wf = reconstruct_from_zernike(coe, modes)
 
     # 6.2 重构真实近场振幅 A0
     np.random.seed(2)
-    A0_mat = np.zeros(240)
-    for i in range(nZer):
-        A0_mat = A0_mat + y_test[idx, i] * modes[:, :, i]
-    A0_mat = A0_mat + y_test[idx, -1]  # 最小值偏移
+    A0 = reconstruct_from_zernike(y_test[idx, :n_amp], modes) + y_test[idx, -1]
 
     # 6.3 传统方法: 真实光强 + 波前 → 测量斜率 → 复原
-    IntensityMat = np.zeros_like(mask)
-    IntensityMat[8:248, 8:248] = A0_mat
-    Input_trad = IntensityMat * np.exp(-1j * wf)
-
+    Input_trad = A0 * np.exp(-1j * wf)
     slopes_int, _ = hs.measure_slopes(Input_trad, noise_sigma=cfg.noise_sigma)
-    recoe = hs.reconstruct(slopes_int, Recon)  # 传统方法复原系数
+    recoe = hs.reconstruct(slopes_int, Recon)
+    recoe[:wf_skip] = 0.0
 
     # 6.4 本方法: ELM 预测光强 → 测斜率 → 差分
-    A1_mat = np.zeros(240)
-    for i in range(nZer):
-        if i < nZer:
-            A1_mat = A1_mat + T_sim[idx, i] * modes[:, :, i]
-    A1_mat = A1_mat + T_sim[idx, -1]
+    A1 = reconstruct_from_zernike(T_sim[idx, :n_amp], modes) + T_sim[idx, -1]
 
-    # ELM预测光强单独入射
-    IntensityMat_R = np.zeros_like(mask)
-    IntensityMat_R[8:248, 8:248] = A1_mat
-    Input_R = IntensityMat_R  # 纯振幅，无波前
-
+    Input_R = A1  # 纯振幅，无波前
     slopes_r, _ = hs.measure_slopes(Input_R, noise_sigma=cfg.noise_sigma)
-    # 差分斜率: 含波前斜率 - 纯光强斜率 = 纯波前斜率
     recoeR = hs.reconstruct(slopes_int - slopes_r, Recon)
+    recoeR[:wf_skip] = 0.0
 
     # ---- 7. 结果对比 ----
-    # 泽尼克系数对比 (从第3阶开始)
+    # 泽尼克系数对比
     fig, ax = plt.subplots(1, 1, figsize=(8, 5))
-    orders = np.arange(2, cfg.n_wf_modes)
-    ax.plot(orders, coe[2:], "ko-", linewidth=1.5, label="真实值")
-    ax.plot(orders, recoe[2:], "r.-", linewidth=1.5, label="传统方法")
-    ax.plot(orders, recoeR[2:], "b.-", linewidth=1.5, label="本方法")
+    orders = np.arange(wf_skip, n_wf)
+    ax.plot(orders, coe[wf_skip:], "ko-", linewidth=1.5, label="真实值")
+    ax.plot(orders, recoe[wf_skip:], "r.-", linewidth=1.5, label="传统方法")
+    ax.plot(orders, recoeR[wf_skip:], "b.-", linewidth=1.5, label="本方法")
     ax.set_xlabel("泽尼克阶数", fontsize=13)
     ax.set_ylabel("泽尼克系数", fontsize=13)
-    ax.set_title("泽尼克系数对比 (三种方法)", fontsize=13)
+    ax.set_title("波前泽尼克系数对比 (三种方法)", fontsize=13)
     ax.legend(fontsize=12)
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
@@ -239,29 +182,27 @@ def main():
     plt.show()
 
     # 重构波前分布图
-    wf_0 = np.zeros(240)  # 真实波前
-    wf_1 = np.zeros(240)  # 传统方法复原
-    wf_r = np.zeros(240)  # 本方法复原
-    for i in range(2, cfg.n_wf_modes):
-        wf_0 = wf_0 + coe[i] * modes[:, :, i]
-        wf_1 = wf_1 + recoe[i] * modes[:, :, i]
-        wf_r = wf_r + recoeR[i] * modes[:, :, i]
+    wf_0 = reconstruct_from_zernike(coe, modes)
+    wf_1 = reconstruct_from_zernike(recoe, modes)
+    wf_r = reconstruct_from_zernike(recoeR, modes)
 
-    mask_240 = circ_mask(240)
+    wf_0_m = wf_0 * mask
+    wf_1_m = wf_1 * mask
+    wf_r_m = wf_r * mask
 
     fig, axes = plt.subplots(1, 3, figsize=(14, 5))
     vlim = 2.0
-    im0 = axes[0].imshow(wf_0 * mask_240, cmap="jet", vmin=-vlim, vmax=vlim)
+    im0 = axes[0].imshow(wf_0_m, cmap="jet", vmin=-vlim, vmax=vlim)
     axes[0].set_title("入射波前 (真实)", fontsize=13)
     axes[0].axis("off")
     plt.colorbar(im0, ax=axes[0], shrink=0.8)
 
-    im1 = axes[1].imshow(wf_1 * mask_240, cmap="jet", vmin=-vlim, vmax=vlim)
+    im1 = axes[1].imshow(wf_1_m, cmap="jet", vmin=-vlim, vmax=vlim)
     axes[1].set_title("传统方法复原波前", fontsize=13)
     axes[1].axis("off")
     plt.colorbar(im1, ax=axes[1], shrink=0.8)
 
-    im2 = axes[2].imshow(wf_r * mask_240, cmap="jet", vmin=-vlim, vmax=vlim)
+    im2 = axes[2].imshow(wf_r_m, cmap="jet", vmin=-vlim, vmax=vlim)
     axes[2].set_title("本方法复原波前", fontsize=13)
     axes[2].axis("off")
     plt.colorbar(im2, ax=axes[2], shrink=0.8)
@@ -271,18 +212,17 @@ def main():
     plt.savefig(os.path.join(cfg.result_dir, "wavefront_comparison.png"), dpi=150)
     plt.show()
 
-    # 残差图 — 使用统一的波前 RMS/PV 计算
-    wl = cfg.wavelength
-    rms_trad = compute_rms_wavefront(wf_1, wf_0, wl, mask_240)
-    pv_trad = compute_pv_wavefront(wf_1, wf_0, wl, mask_240)
-    rms_prop = compute_rms_wavefront(wf_r, wf_0, wl, mask_240)
-    pv_prop = compute_pv_wavefront(wf_r, wf_0, wl, mask_240)
+    # 残差
+    rms_trad = compute_rms_wavefront(wf_1, wf_0, mask)
+    pv_trad = compute_pv_wavefront(wf_1, wf_0, mask)
+    rms_prop = compute_rms_wavefront(wf_r, wf_0, mask)
+    pv_prop = compute_pv_wavefront(wf_r, wf_0, mask)
 
     print(f"  传统方法: RMS ≈ {rms_trad:.4f}λ, PV ≈ {pv_trad:.4f}λ")
     print(f"  本方法:   RMS ≈ {rms_prop:.4f}λ, PV ≈ {pv_prop:.4f}λ")
 
-    diff_trad = (wf_1 - wf_0) * mask_240
-    diff_prop = (wf_r - wf_0) * mask_240
+    diff_trad = (wf_1 - wf_0) * mask
+    diff_prop = (wf_r - wf_0) * mask
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     im3 = axes[0].imshow(diff_trad, cmap="jet", vmin=-vlim, vmax=vlim)
@@ -305,8 +245,8 @@ def main():
     plt.show()
 
     # 近场振幅二维对比
-    NF0 = A0_mat * mask_240
-    NF1 = A1_mat * mask_240
+    NF0 = A0 * mask
+    NF1 = A1 * mask
     cMax = max(np.max(NF0), np.max(NF1))
 
     fig, axes = plt.subplots(1, 3, figsize=(14, 5))
@@ -325,7 +265,7 @@ def main():
     axes[2].axis("off")
     plt.colorbar(im7, ax=axes[2], shrink=0.8)
 
-    fig.suptitle(f"近场分布对比 ({cfg.n_zernike_amp}阶泽尼克)", fontsize=14)
+    fig.suptitle(f"近场分布对比 ({n_amp}阶泽尼克)", fontsize=14)
     plt.tight_layout()
     plt.savefig(os.path.join(cfg.result_dir, "nearfield_comparison.png"), dpi=150)
     plt.show()

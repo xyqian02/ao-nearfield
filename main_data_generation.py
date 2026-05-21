@@ -1,16 +1,16 @@
 """
 数据生成主脚本
 
-生成仿真训练数据集：随机生成泽尼克系数作为标签(OutputData)，
-通过哈特曼子孔径衍射计算得到各子孔径总光强作为特征(InputData)。
+生成仿真训练数据集：随机生成光强泽尼克系数作为标签(OutputData)，
+通过哈特曼子孔径衍射传播计算各子孔径总光强作为特征(InputData)。
 
 核心流程:
-1. 加载子孔径配置(Subcfg)和泽尼克模式矩阵(modes)
-2. 对指定阶数 nZer，生成 nSignal 组随机泽尼克系数
-3. 重构近场振幅分布(泽尼克模式线性组合)
-4. 可选叠加随机波前(相位扰动)
-5. 对每个子孔径进行衍射传播(DL) → 焦斑光强 → 加噪 → 求和
-6. 保存 InputData(n_samples × n_sub) 和 OutputData(n_samples × (nZer+1))
+1. 按配置生成子孔径坐标(subcfg)和泽尼克模式矩阵(modes)
+2. 对指定阶数 n_amp_modes，生成 n_samples 组随机光强泽尼克系数
+3. 重构近场振幅分布 (modes 线性组合，全图 image_size×image_size)
+4. 可选叠加随机波前 (flag_wf)
+5. 对每个有效子孔径进行衍射传播(DL) → 焦斑光强 → 加噪 → 求和
+6. 保存 InputData(n_samples × n_sub) 和 OutputData(n_samples × (n_amp_modes+1))
 
 MATLAB 对应: Main_Data_Generation.m
 """
@@ -19,65 +19,39 @@ import os
 import sys
 import numpy as np
 import matplotlib.pyplot as plt
-from dataclasses import dataclass
 from tqdm import tqdm
 
-# 添加项目根目录到 Python 路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from configs import get_config
 from src.optics import Optics
-from src.utils import load_mat, save_mat, set_seed, configure_chinese_font, get_data_filename, reconstruct_from_zernike, create_embedded_mask
-
-
-# ===========================================================================
-# 参数配置
-# ===========================================================================
-@dataclass
-class Config:
-    """仿真参数配置，所有可调参数集中在此，方便替换"""
-
-    # ---- 光学系统参数 ----
-    wavelength: float = 1.064e-3          # 波长 (mm)
-    focal_length: float = 21.0            # 微透镜焦距 (mm)
-    pixel_pitch: float = 14e-3            # 像元尺寸 (mm/pixel)
-    sub_ap_pixels: int = 20               # 子孔径边长 (像素)
-    image_size: int = 256                 # 图像尺寸 (像素)
-
-    # ---- 数据生成参数 ----
-    n_zernike: int = 25                   # 泽尼克模式阶数 (可循环多阶)
-    n_zernike_range: tuple = (25, 25, 5)  # (起始, 结束, 步长)
-    n_samples: int = 10000                # 样本总数
-
-    # ---- 噪声与扰动 ----
-    noise_sigma: float = 0.5              # 相机本底噪声 RMS
-    flag_noise: bool = True               # 是否添加噪声
-    flag_wf: bool = True                  # 是否添加波前扰动
-    wf_coeff_std: float = 0.2             # 波前系数标准差
-    n_wf_modes: int = 15                  # 波前扰动阶数
-
-    # ---- 随机种子 ----
-    seed: int = 42
-
-    # ---- 路径 ----
-    accessories_dir: str = "accessories"
-    data_dir: str = "data"
+from src.hartmann import HartmannSensor
+from src.utils import (
+    set_seed,
+    configure_chinese_font,
+    get_data_filename,
+    generate_modes,
+    generate_mask,
+    generate_subcfg,
+    save_mat,
+    reconstruct_from_zernike,
+)
 
 
 def main():
-    cfg = Config()
+    cfg = get_config()
     set_seed(cfg.seed)
-    configure_chinese_font()  # 初始化中文字体支持
+    configure_chinese_font()
 
-    # ---- 加载辅助数据 ----
-    print("加载辅助数据...")
-    subcfg = load_mat(os.path.join(cfg.accessories_dir, "Subcfg.mat"), "Subcfg")
-    modes = load_mat(
-        os.path.join(cfg.accessories_dir, "modes250.mat"), "modes"
-    )
-    # modes 形状 (240, 240, 250)，modes[:,:,k] 为第 k+1 阶泽尼克模式
+    # ---- 生成配件 ----
+    print("生成配件数据...")
+    mask = generate_mask(cfg)                         # (image_size, image_size) 圆形光瞳
+    modes = generate_modes(cfg)                       # (n_modes_total, image_size, image_size)
+    subcfg = generate_subcfg(cfg)                     # (2, n_valid_sub)
     n_sub = subcfg.shape[1]
-    print(f"  子孔径数量: {n_sub}")
-    print(f"  泽尼克模式矩阵尺寸: {modes.shape}")
+    print(f"  图像尺寸: {cfg.image_size}×{cfg.image_size}")
+    print(f"  子孔径数: {n_sub} ({cfg.n_sub_dim}×{cfg.n_sub_dim} 阵列, 有效 {n_sub})")
+    print(f"  modes 形状: {modes.shape}")
 
     # ---- 初始化光学系统 ----
     optics = Optics(
@@ -88,9 +62,11 @@ def main():
         sub_ap_pixels=cfg.sub_ap_pixels,
     )
 
+    hs = HartmannSensor(subcfg, optics)  # 复用其子孔径提取逻辑
+
     # ---- 显示子孔径布局 ----
     fig, ax = plt.subplots(1, 1, figsize=(6, 6))
-    ax.imshow(np.zeros((cfg.image_size, cfg.image_size)), cmap="jet", vmin=0, vmax=1)
+    ax.imshow(mask, cmap="gray", vmin=0, vmax=1)
     for i in range(n_sub):
         y1 = subcfg[0, i] + cfg.image_size / 2
         x1 = subcfg[1, i] + cfg.image_size / 2
@@ -100,88 +76,63 @@ def main():
         )
         ax.add_patch(rect)
     ax.set_aspect("equal")
-    ax.set_title("子孔径布局 (红色矩形)")
+    ax.set_title(f"子孔径布局 ({cfg.n_sub_dim}×{cfg.n_sub_dim}, 有效{n_sub})")
     plt.tight_layout()
     plt.show()
 
-    mask = create_embedded_mask(cfg.image_size, 240)
-
     # ---- 数据生成主循环 ----
     os.makedirs(cfg.data_dir, exist_ok=True)
+    IS = cfg.image_size  # 简写
 
-    for nZer in range(
-        cfg.n_zernike_range[0],
-        cfg.n_zernike_range[1] + 1,
-        cfg.n_zernike_range[2],
+    for n_amp in range(
+        cfg.n_amp_modes_range[0],
+        cfg.n_amp_modes_range[1] + 1,
+        cfg.n_amp_modes_range[2],
     ):
-        print(f"\n生成 {nZer} 阶泽尼克数据...")
+        print(f"\n生成光强 {n_amp} 阶泽尼克数据...")
 
-        # 预分配数组: sklearn 约定 (n_samples, n_features)
-        OutputData = np.zeros((cfg.n_samples, nZer + 1))
+        OutputData = np.zeros((cfg.n_samples, n_amp + 1))
         InputData = np.zeros((cfg.n_samples, n_sub))
 
-        # 随机生成泽尼克系数（高斯分布 N(0,1)）
-        temp_coeffs = np.random.randn(cfg.n_samples, nZer)
-        # 可选的指数衰减: for i in range(nZer): ratio=10*exp(-i/30); temp_coeffs[i]*=ratio
-        OutputData[:, :nZer] = temp_coeffs
+        # 随机光强泽尼克系数 (N(0,1))
+        temp_coeffs = np.random.randn(cfg.n_samples, n_amp)
+        OutputData[:, :n_amp] = temp_coeffs
 
-        for i in tqdm(range(cfg.n_samples), desc=f"  {nZer}阶泽尼克数据", unit="样本"):
+        for i in tqdm(range(cfg.n_samples), desc=f"  {n_amp}阶", unit="样本"):
 
-            # ---- 重构近场振幅分布 ----
-            tempA = np.zeros(240)
-            for j in range(nZer):
-                # modes[:,:,j] 是第 j+1 阶泽尼克模式 (240×240)
-                tempA = tempA + OutputData[i, j] * modes[:, :, j]
+            # ---- 重构近场振幅 (全图 image_size×image_size) ----
+            Ampl = reconstruct_from_zernike(OutputData[i, :n_amp], modes)
 
-            # 保存最小值用于后续偏移
-            min_val = np.min(tempA)
-            OutputData[i, nZer] = -min_val
-
-            # 振幅分布 (256×256)，非负
-            Ampl = np.zeros((cfg.image_size, cfg.image_size))
-            Ampl[8:248, 8:248] = tempA - min_val
+            # 偏移确保非负
+            min_val = np.min(Ampl)
+            OutputData[i, n_amp] = -min_val
+            Ampl = Ampl - min_val
 
             # ---- 可选: 叠加随机波前 ----
-            wf = np.zeros((cfg.image_size, cfg.image_size))
+            wf = np.zeros((IS, IS))
             if cfg.flag_wf:
                 coe = cfg.wf_coeff_std * np.random.randn(cfg.n_wf_modes)
-                tempW = np.zeros(240)
-                for jj in range(cfg.n_wf_modes):
-                    tempW = tempW + coe[jj] * modes[:, :, jj]
-                wf[8:248, 8:248] = tempW
+                coe[:cfg.wf_skip_count] = 0.0  # 跳过低阶模式 (piston+tip+tilt)
+                wf = reconstruct_from_zernike(coe, modes)
 
-            # 入射复振幅场
             InputField = Ampl * np.exp(-1j * wf)
 
             # ---- 对每个子孔径进行衍射计算 ----
-            for iSub in range(n_sub):
-                # 计算子孔径区域在图像中的位置 (MATLAB 1-based → Python 0-based)
-                y1_mat = int(np.round(subcfg[0, iSub] + cfg.image_size / 2))
-                x1_mat = int(np.round(subcfg[1, iSub] + cfg.image_size / 2))
-                y1_py = max(0, min(y1_mat - 1, cfg.image_size - cfg.sub_ap_pixels))
-                x1_py = max(0, min(x1_mat - 1, cfg.image_size - cfg.sub_ap_pixels))
+            for i_sub in range(n_sub):
+                sub_field = hs._extract_sub_ap_field(InputField, i_sub)
 
-                sub_field = InputField[
-                    y1_py : y1_py + cfg.sub_ap_pixels,
-                    x1_py : x1_py + cfg.sub_ap_pixels,
-                ]
-
-                # 衍射传播
                 result = optics.dl_propagate(sub_field)
                 spot = np.abs(result) ** 2
 
-                # 添加噪声
                 if cfg.flag_noise:
                     spot = spot + 1.0 + cfg.noise_sigma * np.random.randn(
                         cfg.sub_ap_pixels, cfg.sub_ap_pixels
                     )
 
-                # 记录该子孔径总光强
-                InputData[i, iSub] = np.sum(spot)
+                InputData[i, i_sub] = np.sum(spot)
 
         # ---- 保存数据 ----
-        suffix = get_data_filename(nZer, cfg.flag_noise, cfg.flag_wf)
-
+        suffix = get_data_filename(cfg)
         input_path = os.path.join(cfg.data_dir, f"InputData{suffix}.mat")
         output_path = os.path.join(cfg.data_dir, f"OutputData{suffix}.mat")
         save_mat(input_path, InputData=InputData)

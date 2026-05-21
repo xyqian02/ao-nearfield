@@ -1,9 +1,11 @@
 """
 泽尼克阶数影响分析主脚本
 
-分析不同泽尼克阶数 (15~250) 对 ELM 预测 MSE 的影响。
+分析不同光强泽尼克阶数对 ELM 预测 MSE 的影响。
 对于每个阶数，加载对应数据，在验证集上搜索最优神经元数，
 记录验证集最优 MSE，绘制 MSE 随泽尼克阶数的变化曲线。
+
+注意: 此脚本需要对应阶数的数据文件已存在 (由 main_data_generation.py 生成)。
 
 MATLAB 对应: Main_SureMax.m
 """
@@ -12,91 +14,69 @@ import os
 import sys
 import numpy as np
 import matplotlib.pyplot as plt
-from dataclasses import dataclass
 from tqdm import tqdm
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import train_test_split
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from configs import get_config
 from src.elm import ELM
 from src.evaluation import compute_mse
 from src.utils import (
     load_mat,
     set_seed,
     configure_chinese_font,
-    get_data_filename,
 )
 
 
-# ===========================================================================
-# 参数配置
-# ===========================================================================
-@dataclass
-class Config:
-    """泽尼克阶数影响分析配置"""
-
-    # ---- 搜索范围 ----
-    zernike_range: tuple = (15, 250, 5)       # (起始阶数, 结束阶数, 步长)
-
-    # ---- ELM 参数 ----
-    activation: str = "softplus"
-    hidden_range: tuple = (100, 1500, 50)     # 每个阶数的搜索范围
-
-    # ---- 数据标记 ----
-    flag_noise: bool = True
-    flag_wf: bool = True
-
-    # ---- 随机种子 ----
-    seed: int = 42
-
-    # ---- 路径 ----
-    accessories_dir: str = "accessories"
-    data_dir: str = "data"
-    result_dir: str = "result"
-
-
 def main():
-    cfg = Config()
+    cfg = get_config()
     set_seed(cfg.seed)
     configure_chinese_font()
     os.makedirs(cfg.result_dir, exist_ok=True)
 
     zernike_orders = list(
-        range(cfg.zernike_range[0], cfg.zernike_range[1] + 1, cfg.zernike_range[2])
+        range(cfg.suremax_zernike_range[0],
+              cfg.suremax_zernike_range[1] + 1,
+              cfg.suremax_zernike_range[2])
     )
     n_orders = len(zernike_orders)
     MSE_results = np.zeros(n_orders)
 
     hidden_list = list(
-        range(cfg.hidden_range[0], cfg.hidden_range[1] + 1, cfg.hidden_range[2])
+        range(cfg.opt_hidden_range[0], cfg.opt_hidden_range[1] + 1, cfg.opt_hidden_range[2])
     )
 
-    print(f"分析泽尼克阶数 {zernike_orders[0]}~{zernike_orders[-1]} 对 MSE 的影响...")
+    print(f"分析光强泽尼克阶数 {zernike_orders[0]}~{zernike_orders[-1]} 对 MSE 的影响...")
     fig, ax = plt.subplots(1, 1, figsize=(8, 5))
     plt.ion()
 
     pbar = tqdm(zernike_orders, desc="泽尼克阶数分析", unit="阶")
     for idx, NN in enumerate(pbar):
         pbar.set_postfix({"当前阶数": f"{NN}"})
-        name = get_data_filename(NN, cfg.flag_noise, cfg.flag_wf)
 
-        input_path = os.path.join(cfg.data_dir, f"InputData{name}.mat")
-        output_path = os.path.join(cfg.data_dir, f"OutputData{name}.mat")
+        # 构建该阶数的文件名
+        suffix = f"_s{cfg.image_size}_a{NN}"
+        if cfg.flag_noise:
+            suffix += "_noise"
+        if cfg.flag_wf:
+            suffix += "_wf"
+
+        input_path = os.path.join(cfg.data_dir, f"InputData{suffix}.mat")
+        output_path = os.path.join(cfg.data_dir, f"OutputData{suffix}.mat")
 
         if not os.path.exists(input_path):
             MSE_results[idx] = np.nan
             continue
 
-        # 加载数据
         InputData = load_mat(input_path)
         OutputData = load_mat(output_path)
-        nZer = OutputData.shape[1] - 1
+        n_amp = OutputData.shape[1] - 1
 
-        X = InputData                       # (n_samples, n_features)
-        y = OutputData[:, :nZer]            # (n_samples, n_outputs), 不含 offset 列
+        X = InputData
+        y = OutputData[:, :n_amp]  # 不含 offset 列
 
-        # 划分训练/验证集 (80/20，不需要测试集)
         X_train, X_val, y_train, y_val = train_test_split(
             X, y, test_size=0.2, shuffle=False
         )
@@ -107,7 +87,6 @@ def main():
         y_train_norm = scaler_y.transform(y_train)
         X_val_norm = scaler_X.transform(X_val)
 
-        # 搜索最优神经元数 (验证集评估)
         best_mse = np.inf
         for n_hid in hidden_list:
             elm = ELM(n_hidden=n_hid, activation=cfg.activation, random_state=cfg.seed)
@@ -120,7 +99,6 @@ def main():
 
         MSE_results[idx] = best_mse
 
-        # 实时绘图
         valid_idx = ~np.isnan(MSE_results)
         ax.clear()
         ax.plot(
@@ -128,13 +106,12 @@ def main():
             MSE_results[valid_idx],
             "b-", linewidth=1.5,
         )
-        ax.set_xlabel("泽尼克阶数", fontsize=13)
+        ax.set_xlabel("光强泽尼克阶数", fontsize=13)
         ax.set_ylabel("MSE (验证集最优)", fontsize=13)
-        ax.set_title("MSE 随泽尼克阶数的变化", fontsize=13)
+        ax.set_title("MSE 随光强泽尼克阶数的变化", fontsize=13)
         ax.grid(True, alpha=0.3)
         plt.pause(0.01)
 
-    # 最终图
     valid_idx = ~np.isnan(MSE_results)
     ax.clear()
     ax.plot(
@@ -142,9 +119,9 @@ def main():
         MSE_results[valid_idx],
         "b-", linewidth=1.5,
     )
-    ax.set_xlabel("泽尼克阶数", fontsize=13)
+    ax.set_xlabel("光强泽尼克阶数", fontsize=13)
     ax.set_ylabel("MSE (验证集最优)", fontsize=13)
-    ax.set_title("MSE 随泽尼克阶数的变化", fontsize=13)
+    ax.set_title("MSE 随光强泽尼克阶数的变化", fontsize=13)
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.ioff()

@@ -20,6 +20,11 @@ env/
 .DS_Store
 Thumbs.db
 
+# 配置 (预设文件入库，激活配置不入库)
+config.json
+config_exp.json
+config_sim.json
+
 # 仿真数据和辅助文件 (不纳入版本控制)
 accessories/
 data/

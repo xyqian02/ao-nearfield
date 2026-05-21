@@ -2,7 +2,7 @@
 工具函数模块
 
 提供数据IO（.mat文件读写）、随机种子设置、中文字体配置、
-泽尼克重构等基础功能。
+泽尼克重构、配件生成（subcfg / modes / mask）等基础功能。
 """
 
 import os
@@ -10,6 +10,9 @@ import numpy as np
 import scipy.io as sio
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
+
+from .optics import Optics
+from .hartmann import create_sub_valid, create_subcfg
 
 
 def configure_chinese_font() -> None:
@@ -106,19 +109,27 @@ def circ_mask(size: int = 240) -> np.ndarray:
 
 
 def get_data_filename(
-    n_zernike: int,
-    flag_noise: bool = True,
-    flag_wf: bool = True,
+    cfg,
+    flag_noise: bool | None = None,
+    flag_wf: bool | None = None,
 ) -> str:
     """
-    根据泽尼克阶数和噪声/波前标记生成数据文件名后缀
+    根据配置生成数据文件名后缀，包含图像尺寸和光强阶数避免不同配置混淆
 
-    此函数替代各主脚本中重复定义的 _get_data_name 函数。
+    参数:
+        cfg: SystemConfig 对象，或兼容的含有 image_size / n_amp_modes 的对象
+        flag_noise: 覆盖 cfg.flag_noise
+        flag_wf: 覆盖 cfg.flag_wf
     """
-    suffix = f"_{n_zernike}"
-    if flag_noise:
+    fn = flag_noise if flag_noise is not None else cfg.flag_noise
+    fw = flag_wf if flag_wf is not None else cfg.flag_wf
+    if cfg.beam_size < cfg.image_size:
+        suffix = f"_s{cfg.image_size}b{cfg.beam_size}_a{cfg.n_amp_modes}"
+    else:
+        suffix = f"_s{cfg.image_size}_a{cfg.n_amp_modes}"
+    if fn:
         suffix += "_noise"
-    if flag_wf:
+    if fw:
         suffix += "_wf"
     return suffix
 
@@ -126,30 +137,35 @@ def get_data_filename(
 def reconstruct_from_zernike(
     coeffs: np.ndarray,
     modes: np.ndarray,
-    n_modes: int | None = None,
-    start_mode: int = 0,
+    start_order: int = 1,
+    end_order: int | None = None,
 ) -> np.ndarray:
     """
-    从泽尼克系数向量化重构空间分布（单行替代整个 for 循环）
+    从泽尼克系数向量化重构空间分布
 
     使用 np.tensordot 一次性完成所有模式的加权叠加，
     比逐个模式循环快 10-30 倍。
 
     参数:
-        coeffs: 泽尼克系数向量，形状 (n_modes,) 或更长
-        modes: 泽尼克模式矩阵，形状 (H, W, N)
-        n_modes: 使用的阶数，默认使用 coeffs 长度
-        start_mode: 起始阶数 (0-based)，默认 0
+        coeffs: 泽尼克系数向量，coeffs[k] 对应 Noll 第 k+1 阶
+        modes: 泽尼克模式矩阵，形状 (H, W, N)，modes[:,:,k] 为 Noll 第 k+1 阶
+        start_order: 起始 Noll 阶数 (1-based，含)，默认 1
+        end_order: 结束 Noll 阶数 (1-based，含)，默认使用 coeffs 全部长度
 
     返回:
         (H, W) 的空间分布
+
+    示例:
+        reconstruct_from_zernike(coe, modes)          # 全部阶数
+        reconstruct_from_zernike(coe, modes, 2, 15)   # 第2~15阶
     """
-    if n_modes is None:
-        n_modes = len(coeffs)
+    if end_order is None:
+        end_order = len(coeffs)
+    start_idx = start_order - 1
     # tensordot: (n_modes,) · (H, W, n_modes) → (H, W)
     return np.tensordot(
-        coeffs[start_mode : start_mode + n_modes],
-        modes[:, :, start_mode : start_mode + n_modes],
+        coeffs[start_idx:end_order],
+        modes[:, :, start_idx:end_order],
         axes=([0], [2]),
     )
 
@@ -159,22 +175,150 @@ def create_embedded_mask(
     beam_size: int = 240,
 ) -> np.ndarray:
     """
-    创建嵌入在 image_size×image_size 图像中的圆形光束掩模
+    创建嵌入在 image_size×image_size 图像中的圆形光束掩模（旧版兼容）
 
-    光束区域 (beam_size×beam_size) 居中嵌入，外部为 0。
-
-    参数:
-        image_size: 全图尺寸
-        beam_size: 光束区域尺寸
-
-    返回:
-        (image_size, image_size) 的二值掩模
+    当 beam_size == image_size 时等价于全图圆形光瞳。
+    新代码请使用 generate_mask(cfg)。
     """
-    from .optics import Optics
-
     offset = (image_size - beam_size) // 2
     mask = np.zeros((image_size, image_size))
     mask[offset : offset + beam_size, offset : offset + beam_size] = (
         Optics.std_beam(beam_size, 100, 100, 1e99)
     )
     return mask
+
+
+# =========================================================================
+# 配件生成函数 — 按配置自动生成 subcfg / modes / mask
+# =========================================================================
+
+
+def generate_mask(cfg) -> np.ndarray:
+    """
+    按配置生成圆形光瞳掩模
+
+    beam_size < image_size 时光束嵌入靶面中心，使用 std_beam (匹配 MATLAB StdBeamFunc.m)。
+    beam_size == image_size 时使用 pupil_circle 全图光瞳。
+
+    参数:
+        cfg: SystemConfig
+
+    返回:
+        (image_size, image_size) 的二值圆形光瞳
+    """
+    if cfg.beam_size < cfg.image_size:
+        return create_embedded_mask(cfg.image_size, cfg.beam_size)
+    return Optics.pupil_circle(cfg.image_size)
+
+
+def generate_modes(cfg) -> np.ndarray:
+    """
+    按配置生成泽尼克模式矩阵
+
+    模式在 beam_size×beam_size 网格上生成，嵌入到 image_size 靶面中心。
+    modes[:,:,k] = Noll 索引 k+1 阶泽尼克多项式 (保持 MATLAB (H,W,N) 布局)。
+
+    参数:
+        cfg: SystemConfig (使用 image_size, beam_size, n_modes_total)
+
+    返回:
+        (image_size, image_size, n_modes_total) 的泽尼克模式数组
+    """
+    n_total = cfg.n_modes_total
+    BS = cfg.beam_size
+    IS = cfg.image_size
+    modes_nhw = Optics.zernike_modes(n_total, BS)  # (n_total, BS, BS)
+    if BS < IS:
+        offset = cfg.beam_offset
+        padded = np.zeros((n_total, IS, IS))
+        padded[:, offset:offset + BS, offset:offset + BS] = modes_nhw
+        return np.transpose(padded, (1, 2, 0))   # (IS, IS, n_total)
+    return np.transpose(modes_nhw, (1, 2, 0))     # (IS, IS, n_total)
+
+
+def generate_subcfg(cfg) -> np.ndarray:
+    """
+    按配置生成子孔径坐标矩阵
+
+    使用 generate_mask 作为有效区域判定依据，自动筛选有效子孔径。
+
+    参数:
+        cfg: SystemConfig (使用 image_size, n_sub_dim, sub_ap_pixels, beam_size)
+
+    返回:
+        (2, n_valid_sub) 的坐标矩阵，第0行=y坐标，第1行=x坐标，
+        坐标以图像中心为原点
+    """
+    near_field = generate_mask(cfg)
+    sub_valid = create_sub_valid(cfg.n_sub_dim, near_field, cfg.sub_ap_pixels,
+                                 ratio=cfg.sub_valid_ratio)
+    subcfg = create_subcfg(sub_valid, cfg.image_size, cfg.sub_ap_pixels)
+    return subcfg
+
+
+def save_accessories(cfg, modes=None, subcfg=None) -> None:
+    """
+    将 modes 和 subcfg 缓存为 .mat 文件，加速后续加载
+
+    文件名自动包含配置关键参数以避免混淆。
+
+    参数:
+        cfg: SystemConfig
+        modes: 泽尼克模式矩阵，None=自动生成
+        subcfg: 子孔径坐标矩阵，None=自动生成
+    """
+    os.makedirs(cfg.accessories_dir, exist_ok=True)
+
+    if subcfg is None:
+        subcfg = generate_subcfg(cfg)
+    bs_tag = f"b{cfg.beam_size}_" if cfg.beam_size < cfg.image_size else ""
+    subcfg_path = os.path.join(
+        cfg.accessories_dir,
+        f"Subcfg_{bs_tag}s{cfg.image_size}_d{cfg.n_sub_dim}_p{cfg.sub_ap_pixels}.mat",
+    )
+    save_mat(subcfg_path, Subcfg=subcfg)
+    print(f"  子孔径配置已保存: {subcfg_path} ({subcfg.shape[1]} 个有效子孔径)")
+
+    if modes is None:
+        modes = generate_modes(cfg)
+    modes_path = os.path.join(
+        cfg.accessories_dir,
+        f"modes_{bs_tag}s{cfg.image_size}_n{cfg.n_modes_total}.mat",
+    )
+    save_mat(modes_path, modes=modes)
+    print(f"  泽尼克模式已保存: {modes_path} ({modes.shape})")
+
+
+def load_accessories(cfg) -> tuple[np.ndarray, np.ndarray]:
+    """
+    加载或自动生成配件数据 (subcfg, modes)
+
+    优先从 .mat 缓存加载，缓存不存在时自动生成并保存。
+
+    参数:
+        cfg: SystemConfig
+
+    返回:
+        (subcfg, modes): 子孔径坐标 (2, n_sub) 和泽尼克模式 (H, W, n_modes_total)
+    """
+    bs_tag = f"b{cfg.beam_size}_" if cfg.beam_size < cfg.image_size else ""
+    subcfg_path = os.path.join(
+        cfg.accessories_dir,
+        f"Subcfg_{bs_tag}s{cfg.image_size}_d{cfg.n_sub_dim}_p{cfg.sub_ap_pixels}.mat",
+    )
+    modes_path = os.path.join(
+        cfg.accessories_dir,
+        f"modes_{bs_tag}s{cfg.image_size}_n{cfg.n_modes_total}.mat",
+    )
+
+    if os.path.exists(subcfg_path) and os.path.exists(modes_path):
+        subcfg = load_mat(subcfg_path, "Subcfg")
+        modes = load_mat(modes_path, "modes")
+        print(f"  已加载配件: {subcfg.shape[1]} 子孔径, modes {modes.shape}")
+    else:
+        print("  配件缓存不存在，自动生成...")
+        subcfg = generate_subcfg(cfg)
+        modes = generate_modes(cfg)
+        save_accessories(cfg, modes=modes, subcfg=subcfg)
+
+    return subcfg, modes

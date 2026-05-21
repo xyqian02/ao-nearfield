@@ -65,7 +65,6 @@ def compute_r2(y_true: np.ndarray, y_pred: np.ndarray) -> float:
 def compute_rms_wavefront(
     wf_pred: np.ndarray,
     wf_true: np.ndarray,
-    wavelength: float,
     mask: np.ndarray | None = None,
 ) -> float:
     """
@@ -74,7 +73,6 @@ def compute_rms_wavefront(
     参数:
         wf_pred: 复原波前 (2D, 单位: 弧度)
         wf_true: 真实波前 (2D, 单位: 弧度)
-        wavelength: 波长 (mm)
         mask: 可选掩模，仅计算掩模内有效区域
 
     返回:
@@ -83,13 +81,12 @@ def compute_rms_wavefront(
     residual = wf_pred - wf_true
     if mask is not None:
         residual = residual[mask != 0]
-    return float(np.std(residual) / (2 * np.pi) * wavelength * 1e3)
+    return float(np.std(residual) / (2 * np.pi))
 
 
 def compute_pv_wavefront(
     wf_pred: np.ndarray,
     wf_true: np.ndarray,
-    wavelength: float,
     mask: np.ndarray | None = None,
 ) -> float:
     """
@@ -98,7 +95,6 @@ def compute_pv_wavefront(
     参数:
         wf_pred: 复原波前 (2D, 单位: 弧度)
         wf_true: 真实波前 (2D, 单位: 弧度)
-        wavelength: 波长 (mm)
         mask: 可选掩模，仅计算掩模内有效区域
 
     返回:
@@ -107,4 +103,4 @@ def compute_pv_wavefront(
     residual = wf_pred - wf_true
     if mask is not None:
         residual = residual[mask != 0]
-    return float((np.max(residual) - np.min(residual)) / (2 * np.pi) * wavelength * 1e3)
+    return float((np.max(residual) - np.min(residual)) / (2 * np.pi))

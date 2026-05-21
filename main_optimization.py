@@ -14,13 +14,13 @@ import os
 import sys
 import numpy as np
 import matplotlib.pyplot as plt
-from dataclasses import dataclass
 from tqdm import tqdm
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import train_test_split
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from configs import get_config
 from src.elm import ELM
 from src.evaluation import compute_mse, compute_rmse, compute_r2
 from src.utils import (
@@ -32,47 +32,15 @@ from src.utils import (
 from scipy.ndimage import gaussian_filter1d
 
 
-# ===========================================================================
-# 参数配置
-# ===========================================================================
-@dataclass
-class Config:
-    """超参数优化配置"""
-
-    # ---- 实验方法 ----
-    methods: tuple = ("Relu", "Sigmoid", "Tanh", "Softplus")
-
-    # ---- 数据参数 ----
-    n_zernike: int = 25
-    flag_noise: bool = True
-    flag_wf: bool = True
-    test_ratio: float = 0.1
-    val_ratio: float = 0.1
-
-    # ---- 搜索参数 ----
-    hidden_range: tuple = (50, 1000, 10)     # (起始, 结束, 步长)
-    n_runs: int = 5                          # 每个配置的重复次数
-
-    # ---- 随机种子 ----
-    base_seed: int = 23
-
-    # ---- 路径 ----
-    accessories_dir: str = "accessories"
-    data_dir: str = "data"
-    figure_data_dir: str = "figure_data"
-    result_dir: str = "result"
-
-
 def main():
-    cfg = Config()
-    set_seed(cfg.base_seed)
+    cfg = get_config()
+    set_seed(cfg.seed)
     configure_chinese_font()
-    os.makedirs(cfg.figure_data_dir, exist_ok=True)
     os.makedirs(cfg.result_dir, exist_ok=True)
 
     # ---- 1. 加载数据 ----
     print("加载数据...")
-    name = get_data_filename(cfg.n_zernike, cfg.flag_noise, cfg.flag_wf)
+    name = get_data_filename(cfg)
     InputData = load_mat(os.path.join(cfg.data_dir, f"InputData{name}.mat"))
     OutputData = load_mat(os.path.join(cfg.data_dir, f"OutputData{name}.mat"))
 
@@ -101,25 +69,25 @@ def main():
 
     # ---- 3. 主搜索循环 (验证集评估) ----
     hidden_list = list(
-        range(cfg.hidden_range[0], cfg.hidden_range[1] + 1, cfg.hidden_range[2])
+        range(cfg.opt_hidden_range[0], cfg.opt_hidden_range[1] + 1, cfg.opt_hidden_range[2])
     )
-    n_methods = len(cfg.methods)
+    n_methods = len(cfg.opt_methods)
     n_hidden_vals = len(hidden_list)
 
     MSE_mean = np.zeros((n_methods, n_hidden_vals))
     MSE_std = np.zeros((n_methods, n_hidden_vals))
 
-    print(f"搜索 {n_methods} 种激活函数 × {n_hidden_vals} 个神经元数 × {cfg.n_runs} 次重复 (验证集)...")
-    pbar_methods = tqdm(cfg.methods, desc="优化进度", unit="方法")
+    print(f"搜索 {n_methods} 种激活函数 × {n_hidden_vals} 个神经元数 × {cfg.opt_n_runs} 次重复 (验证集)...")
+    pbar_methods = tqdm(cfg.opt_methods, desc="优化进度", unit="方法")
     for m_idx, method in enumerate(pbar_methods):
         pbar_methods.set_postfix({"当前方法": method})
         for h_idx, n_hid in enumerate(hidden_list):
-            mse_runs = np.zeros(cfg.n_runs)
-            for r in range(cfg.n_runs):
+            mse_runs = np.zeros(cfg.opt_n_runs)
+            for r in range(cfg.opt_n_runs):
                 elm = ELM(
                     n_hidden=n_hid,
                     activation=method.lower(),
-                    random_state=cfg.base_seed + r * 1000,
+                    random_state=cfg.seed + r * 1000,
                 )
                 elm.fit(X_train_norm, y_train_norm)
                 y_val_pred_norm = elm.predict(X_val_norm)
@@ -139,7 +107,7 @@ def main():
     y_train_full_norm = scaler_y.transform(y_train_full)
     X_test_norm = scaler_X.transform(X_test)
 
-    for m_idx, method in enumerate(cfg.methods):
+    for m_idx, method in enumerate(cfg.opt_methods):
         best_idx = np.argmin(MSE_mean[m_idx])
         best_neus[m_idx] = hidden_list[best_idx]
         best_val_mses[m_idx] = MSE_mean[m_idx, best_idx]
@@ -147,7 +115,7 @@ def main():
         elm = ELM(
             n_hidden=int(best_neus[m_idx]),
             activation=method.lower(),
-            random_state=cfg.base_seed,
+            random_state=cfg.seed,
         )
         elm.fit(X_train_full_norm, y_train_full_norm)
         y_test_pred_norm = elm.predict(X_test_norm)
@@ -165,7 +133,7 @@ def main():
     colors = plt.cm.tab10(np.linspace(0, 1, n_methods))
 
     legend_handles = []
-    for m_idx, method in enumerate(cfg.methods):
+    for m_idx, method in enumerate(cfg.opt_methods):
         # 高斯平滑
         mean_curve = gaussian_filter1d(MSE_mean[m_idx], sigma=2.0)
         std_curve = gaussian_filter1d(MSE_std[m_idx], sigma=2.0)
@@ -199,7 +167,7 @@ def main():
         )
         legend_handles.append(line)
 
-    ax.legend(legend_handles, cfg.methods, loc="best", frameon=False)
+    ax.legend(legend_handles, cfg.opt_methods, loc="best", frameon=False)
     ax.set_xlabel("隐藏层神经元数", fontsize=13)
     ax.set_ylabel("MSE (验证集)", fontsize=13)
     ax.set_title("不同激活函数性能对比 (均值±标准差)", fontsize=13)
@@ -209,16 +177,16 @@ def main():
 
     plt.tight_layout()
     plt.savefig(
-        os.path.join(cfg.figure_data_dir, "optimization_comparison.png"), dpi=300
+        os.path.join(cfg.result_dir, "optimization_comparison.png"), dpi=300
     )
     plt.savefig(
-        os.path.join(cfg.figure_data_dir, "optimization_comparison.pdf")
+        os.path.join(cfg.result_dir, "optimization_comparison.pdf")
     )
     plt.show()
 
     # ---- 6. 输出结果 ----
     print("\n===== 测试集最终评估 =====")
-    for method in cfg.methods:
+    for method in cfg.opt_methods:
         r = test_results[method]
         print(
             f"  {method}: N={r['best_n']}, "
@@ -235,15 +203,15 @@ def main():
         "MSE_std": MSE_std,
         "best_neus": best_neus,
         "best_val_mses": best_val_mses,
-        "methods": np.array(cfg.methods),
-        "test_mse": np.array([test_results[m]["mse"] for m in cfg.methods]),
-        "test_rmse": np.array([test_results[m]["rmse"] for m in cfg.methods]),
-        "test_r2": np.array([test_results[m]["r2"] for m in cfg.methods]),
+        "methods": np.array(cfg.opt_methods),
+        "test_mse": np.array([test_results[m]["mse"] for m in cfg.opt_methods]),
+        "test_rmse": np.array([test_results[m]["rmse"] for m in cfg.opt_methods]),
+        "test_r2": np.array([test_results[m]["r2"] for m in cfg.opt_methods]),
     }
     np.savez(
-        os.path.join(cfg.figure_data_dir, "optimization_data.npz"), **result_data
+        os.path.join(cfg.result_dir, "optimization_data.npz"), **result_data
     )
-    print(f"\n数据已保存至 '{cfg.figure_data_dir}/optimization_data.npz'")
+    print(f"\n数据已保存至 '{cfg.result_dir}/optimization_data.npz'")
 
 
 if __name__ == "__main__":

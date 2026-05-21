@@ -18,6 +18,11 @@ from .utils import (
     reconstruct_from_zernike,
     create_embedded_mask,
     circ_mask,
+    generate_modes,
+    generate_mask,
+    generate_subcfg,
+    load_accessories,
+    save_accessories,
 )
 
 __all__ = [
@@ -39,4 +44,9 @@ __all__ = [
     "reconstruct_from_zernike",
     "create_embedded_mask",
     "circ_mask",
+    "generate_modes",
+    "generate_mask",
+    "generate_subcfg",
+    "load_accessories",
+    "save_accessories",
 ]
