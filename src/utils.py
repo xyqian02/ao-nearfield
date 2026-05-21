@@ -10,9 +10,10 @@ import numpy as np
 import scipy.io as sio
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
+from PIL import Image
 
 from .optics import Optics
-from .hartmann import create_sub_valid, create_subcfg
+from .hartmann import create_sub_valid, create_subcfg, HartmannSensor
 
 
 def configure_chinese_font() -> None:
@@ -132,6 +133,52 @@ def get_data_filename(
     if fw:
         suffix += "_wf"
     return suffix
+
+
+def _noll_radial_order(j: int) -> int:
+    """Noll 索引 j (1-based) 对应的径向阶数 n"""
+    n = 0
+    while (n + 1) * (n + 2) // 2 < j:
+        n += 1
+    return n
+
+
+def get_zernike_decay_weights(n_modes: int, cfg) -> np.ndarray:
+    """
+    返回各阶泽尼克波前系数的衰减权重
+
+    参数:
+        n_modes: 模式数
+        cfg: SystemConfig (使用 wf_decay_scheme / wf_decay_exponent)
+
+    返回:
+        (n_modes,) 权重数组，用于乘以随机系数
+
+    scheme:
+      "none"        → 全 1.0 (无衰减)
+      "power_law"   → weight[j] = 1 / (radial_order(j+1) + 0.5)^exponent
+      "kolmogorov"  → Noll 1976 大气湍流近似: weight ∝ 1/(n+1)^(5/3)
+    """
+    scheme = getattr(cfg, "wf_decay_scheme", "none")
+    exponent = getattr(cfg, "wf_decay_exponent", 1.6)
+
+    weights = np.ones(n_modes)
+    if scheme == "none":
+        return weights
+
+    for j in range(n_modes):
+        n = _noll_radial_order(j + 1)  # j is 0-based, convert to 1-based Noll
+        if scheme == "power_law":
+            weights[j] = 1.0 / ((n + 0.5) ** exponent)
+        elif scheme == "kolmogorov":
+            # Noll 1976: variance ∝ (n+1)^(-8/3) for Kolmogorov turbulence
+            weights[j] = 1.0 / ((n + 1.0) ** (4.0 / 3.0))
+
+    # 归一化到 weight[0] ≈ 1.0 (对 n≥1 的模式)
+    if n_modes > 1 and weights[1] > 0:
+        weights = weights / weights[1]
+
+    return weights
 
 
 def reconstruct_from_zernike(
@@ -256,6 +303,128 @@ def generate_subcfg(cfg) -> np.ndarray:
     return subcfg
 
 
+def generate_simulation_data(
+    cfg,
+    modes: np.ndarray,
+    subcfg: np.ndarray,
+    optics: Optics,
+    hs: HartmannSensor,
+    n_samples: int,
+    n_amp: int | None = None,
+    enhanced: bool = False,
+    seed: int | None = None,
+    show_progress: bool = True,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    统一仿真数据生成函数
+
+    随机生成光强泽尼克系数 → 重构近场振幅 → 叠加随机波前 →
+    子孔径衍射传播 → 各子孔径总光强。
+
+    参数:
+        cfg: SystemConfig
+        modes: 泽尼克模式矩阵 (H, W, n_modes_total)
+        subcfg: 子孔径坐标 (2, n_sub)
+        optics: Optics 光学系统
+        hs: HartmannSensor (仅用于 _extract_sub_ap_field)
+        n_samples: 样本数
+        n_amp: 光强泽尼克阶数，None=使用 cfg.n_amp_modes
+        enhanced: 是否启用增强模式 (超高斯包络+变方差+随机偏置)
+        seed: 随机种子，None=使用 cfg.seed
+        show_progress: 是否显示进度条
+
+    返回:
+        InputData: (n_samples, n_sub) 子孔径总光强
+        OutputData: (n_samples, n_amp + 1) 光强泽尼克系数 + 偏移量
+    """
+    from tqdm import tqdm
+
+    IS = cfg.image_size
+    if n_amp is None:
+        n_amp = cfg.n_amp_modes
+    n_sub = subcfg.shape[1]
+    rng = np.random.RandomState(seed if seed is not None else cfg.seed)
+
+    InputData = np.zeros((n_samples, n_sub))
+    OutputData = np.zeros((n_samples, n_amp + 1))
+
+    # 预生成所有光强泽尼克系数 (向量化)
+    if enhanced:
+        sigmas = 0.5 + 1.5 * rng.random(n_samples)
+        temp_coeffs = sigmas[:, np.newaxis] * rng.randn(n_samples, n_amp)
+    else:
+        temp_coeffs = rng.randn(n_samples, n_amp)
+    OutputData[:, :n_amp] = temp_coeffs
+
+    # 预生成所有波前系数
+    wf_coeffs_all = None
+    if cfg.flag_wf:
+        wf_weights = get_zernike_decay_weights(cfg.n_wf_modes, cfg)
+        wf_coeffs_all = cfg.wf_coeff_std * wf_weights * rng.randn(
+            n_samples, cfg.n_wf_modes)
+        wf_coeffs_all[:, :cfg.wf_skip_count] = 0.0
+
+    iterator = range(n_samples)
+    if show_progress:
+        desc = "  生成增强仿真数据" if enhanced else "  生成仿真数据"
+        iterator = tqdm(iterator, desc=desc, unit="样本")
+
+    for i in iterator:
+        coeffs_i = OutputData[i, :n_amp]
+
+        if enhanced:
+            Ampl = _generate_enhanced_amplitude(coeffs_i, modes, IS, rng)
+            OutputData[i, n_amp] = 0.0
+        else:
+            Ampl = reconstruct_from_zernike(coeffs_i, modes)
+            min_val = np.min(Ampl)
+            OutputData[i, n_amp] = -min_val
+            Ampl = Ampl - min_val
+
+        # 波前
+        wf = np.zeros((IS, IS))
+        if cfg.flag_wf:
+            wf = reconstruct_from_zernike(wf_coeffs_all[i], modes)
+
+        InputField = Ampl * np.exp(-1j * wf)
+
+        for i_sub in range(n_sub):
+            sub_field = hs._extract_sub_ap_field(InputField, i_sub)
+            result = optics.dl_propagate(sub_field)
+            spot = np.abs(result) ** 2
+
+            if cfg.flag_noise:
+                spot = spot + 1.0 + cfg.noise_sigma * rng.randn(
+                    cfg.sub_ap_pixels, cfg.sub_ap_pixels)
+
+            InputData[i, i_sub] = np.sum(spot)
+
+    return InputData, OutputData
+
+
+def _generate_enhanced_amplitude(
+    coeffs: np.ndarray, modes: np.ndarray, image_size: int,
+    rng: np.random.RandomState,
+) -> np.ndarray:
+    """增强近场振幅: 超高斯包络 + 随机偏置 (方案2 内部函数)"""
+    Ampl = reconstruct_from_zernike(coeffs, modes)
+
+    Y, X = np.meshgrid(
+        np.linspace(-1, 1, image_size),
+        np.linspace(-1, 1, image_size),
+    )
+    r = np.hypot(X, Y)
+    w = 0.6 + 0.4 * rng.random()
+    n_sg = 2.0 + 6.0 * rng.random()
+    envelope = np.exp(-((r / w) ** n_sg))
+    envelope = np.where(r <= 1.0, envelope, 0.0)
+
+    Ampl = Ampl * envelope
+    Ampl = Ampl - np.min(Ampl)
+    bias = 0.2 * rng.random() * np.max(Ampl)
+    return Ampl + bias
+
+
 def save_accessories(cfg, modes=None, subcfg=None) -> None:
     """
     将 modes 和 subcfg 缓存为 .mat 文件，加速后续加载
@@ -322,3 +491,181 @@ def load_accessories(cfg) -> tuple[np.ndarray, np.ndarray]:
         save_accessories(cfg, modes=modes, subcfg=subcfg)
 
     return subcfg, modes
+
+
+# =========================================================================
+# 实验图像处理函数
+# =========================================================================
+
+
+def preprocess_experimental_image(
+    bmp_path: str,
+    threshold: float = 10.0,
+    crop_center_xy: tuple = (272, 251),
+    crop_size: int = 400,
+    flip_lr: bool = True,
+) -> np.ndarray:
+    """
+    BMP → 灰度 → 减阈值去负值 → 裁剪 → 左右翻转
+
+    crop_center_xy 为 MATLAB 1-based 坐标 (x_center, y_center):
+    - x_center (272) → MATLAB rows → numpy rows (第0维)
+    - y_center (251) → MATLAB cols → numpy cols (第1维)
+
+    返回:
+        (crop_size, crop_size) float64 数组
+    """
+    img = np.array(Image.open(bmp_path).convert("L"), dtype=np.float64)
+    img = np.maximum(img - threshold, 0.0)
+
+    x_center, y_center = crop_center_xy
+    half = crop_size // 2
+    # MATLAB: F(x_center-half+1:x_center+half, y_center-half+1:y_center+half)
+    # MATLAB 1-based → Python 0-based: row_start = x_center - half
+    row_start = x_center - half   # 272 - 200 = 72
+    col_start = y_center - half   # 251 - 200 = 51
+    img = img[row_start : row_start + crop_size,
+              col_start : col_start + crop_size]
+
+    if flip_lr:
+        img = np.fliplr(img)
+
+    return img
+
+
+def extract_sub_spot_centroids(
+    spot_image: np.ndarray,
+    subcfg: np.ndarray,
+    sub_ap_pixels: int,
+    image_size: int,
+) -> np.ndarray:
+    """
+    从哈特曼光斑图像直接提取各子孔径质心（不做衍射仿真）
+
+    参数:
+        spot_image: (image_size, image_size) 光斑图像
+        subcfg: (2, n_sub) 子孔径坐标矩阵
+        sub_ap_pixels: 子孔径边长 (像素)
+        image_size: 图像尺寸 (像素)
+
+    返回:
+        (2, n_sub) 质心坐标，第0行=x，第1行=y
+    """
+    n_sub = subcfg.shape[1]
+    centroids = np.zeros((2, n_sub))
+    X_g, Y_g = np.meshgrid(np.arange(sub_ap_pixels), np.arange(sub_ap_pixels))
+
+    for i in range(n_sub):
+        y1_py = int(np.round(subcfg[0, i] + image_size / 2))
+        x1_py = int(np.round(subcfg[1, i] + image_size / 2))
+        y1_py = max(0, min(y1_py, image_size - sub_ap_pixels))
+        x1_py = max(0, min(x1_py, image_size - sub_ap_pixels))
+        sub_spot = spot_image[y1_py : y1_py + sub_ap_pixels, x1_py : x1_py + sub_ap_pixels]
+
+        total = np.sum(sub_spot)
+        if total > 0:
+            centroids[0, i] = np.sum(sub_spot * X_g) / total  # cx
+            centroids[1, i] = np.sum(sub_spot * Y_g) / total  # cy
+
+    return centroids
+
+
+def extract_sub_ap_total_intensity(
+    spot_image: np.ndarray,
+    subcfg: np.ndarray,
+    sub_ap_pixels: int,
+    image_size: int,
+) -> np.ndarray:
+    """
+    从光斑图像提取各子孔径总光强值
+
+    参数:
+        spot_image: (image_size, image_size) 光斑图像
+        subcfg: (2, n_sub) 子孔径坐标矩阵
+        sub_ap_pixels: 子孔径边长 (像素)
+        image_size: 图像尺寸 (像素)
+
+    返回:
+        (n_sub,) 各子孔径总光强
+    """
+    n_sub = subcfg.shape[1]
+    intensity = np.zeros(n_sub)
+
+    for i in range(n_sub):
+        y1_py = int(np.round(subcfg[0, i] + image_size / 2))
+        x1_py = int(np.round(subcfg[1, i] + image_size / 2))
+        y1_py = max(0, min(y1_py, image_size - sub_ap_pixels))
+        x1_py = max(0, min(x1_py, image_size - sub_ap_pixels))
+        sub_spot = spot_image[y1_py : y1_py + sub_ap_pixels, x1_py : x1_py + sub_ap_pixels]
+        intensity[i] = np.sum(sub_spot)
+
+    return intensity
+
+
+# =========================================================================
+# 哈特曼阵列可视化
+# =========================================================================
+
+
+def plot_hartmann_grid(
+    spot_image: np.ndarray,
+    subcfg: np.ndarray,
+    sub_ap_pixels: int,
+    image_size: int,
+    title: str = "",
+    ax=None,
+    cmap: str = "jet",
+    rect_color: str = "r",
+    rect_linewidth: float = 0.5,
+    show_colorbar: bool = True,
+    pupil_radius: float | None = None,
+):
+    """
+    绘制哈特曼光斑图像，叠加有效子孔径网格 + 可选圆形光瞳边界
+
+    参数:
+        spot_image: (image_size, image_size) 光斑图像
+        subcfg: (2, n_sub) 子孔径坐标矩阵
+        sub_ap_pixels: 子孔径边长 (像素)
+        image_size: 图像尺寸 (像素)
+        title: 图表标题
+        ax: 指定坐标轴，None=创建新图
+        cmap: 颜色映射
+        rect_color: 网格线颜色
+        rect_linewidth: 网格线宽
+        show_colorbar: 是否显示 colorbar
+        pupil_radius: 光瞳半径 (像素)，None=不绘制
+
+    返回:
+        ax
+    """
+    from matplotlib.patches import Circle
+
+    if ax is None:
+        _, ax = plt.subplots(1, 1, figsize=(7, 7))
+
+    im = ax.imshow(spot_image, cmap=cmap)
+    n_sub = subcfg.shape[1]
+    for i in range(n_sub):
+        y1 = subcfg[0, i] + image_size / 2
+        x1 = subcfg[1, i] + image_size / 2
+        rect = plt.Rectangle(
+            (x1, y1), sub_ap_pixels, sub_ap_pixels,
+            fill=False, edgecolor=rect_color, linewidth=rect_linewidth,
+        )
+        ax.add_patch(rect)
+
+    if pupil_radius is not None:
+        center = image_size / 2
+        circle = Circle(
+            (center, center), pupil_radius,
+            fill=False, edgecolor="white", linewidth=1.5, linestyle="--",
+        )
+        ax.add_patch(circle)
+
+    ax.set_aspect("equal")
+    ax.set_title(title)
+    if show_colorbar:
+        plt.colorbar(im, ax=ax, shrink=0.8)
+
+    return ax

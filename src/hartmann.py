@@ -144,22 +144,14 @@ class HartmannSensor:
         """
         提取第 i 个子孔径对应的场区域
 
-        将 MATLAB 的 1-based 索引转换为 Python 的 0-based 索引。
-        MATLAB: y1 = Subcfg(1,i) + 128 → InputField(y1:y1+19, x1:x1+19)
-        Python: y1_py = int(y1) - 1 → field[y1_py:y1_py+20, x1_py:x1_py+20]
+        子孔径坐标以图像中心为原点，转换为图像像素索引后提取。
         """
         n_pixels = self.optics.n_pixels
         n_sub_pix = self.optics.sub_ap_pixels
 
-        # 计算 MATLAB 1-based 坐标
-        y1_mat = int(np.round(self.subcfg[0, i] + n_pixels / 2))  # 1-based
-        x1_mat = int(np.round(self.subcfg[1, i] + n_pixels / 2))  # 1-based
+        y1_py = int(np.round(self.subcfg[0, i] + n_pixels / 2))
+        x1_py = int(np.round(self.subcfg[1, i] + n_pixels / 2))
 
-        # 转换为 Python 0-based 索引
-        y1_py = y1_mat - 1
-        x1_py = x1_mat - 1
-
-        # 边界保护
         y1_py = max(0, min(y1_py, n_pixels - n_sub_pix))
         x1_py = max(0, min(x1_py, n_pixels - n_sub_pix))
 
@@ -273,10 +265,10 @@ class HartmannSensor:
             slopes[2 * i + 1] = cy - self.origin_hs[1, i]  # y 方向斜率
 
             # 填入哈特曼图像
-            y1_mat = int(np.round(self.subcfg[0, i] + n_pixels / 2))
-            x1_mat = int(np.round(self.subcfg[1, i] + n_pixels / 2))
-            y1_py = max(0, min(y1_mat - 1, n_pixels - n_sub_pix))
-            x1_py = max(0, min(x1_mat - 1, n_pixels - n_sub_pix))
+            y1_py = int(np.round(self.subcfg[0, i] + n_pixels / 2))
+            x1_py = int(np.round(self.subcfg[1, i] + n_pixels / 2))
+            y1_py = max(0, min(y1_py, n_pixels - n_sub_pix))
+            x1_py = max(0, min(x1_py, n_pixels - n_sub_pix))
             img_mat[y1_py : y1_py + n_sub_pix, x1_py : x1_py + n_sub_pix] = spot
 
         return slopes, img_mat

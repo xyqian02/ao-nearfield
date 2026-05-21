@@ -37,6 +37,7 @@ from src.utils import (
     reconstruct_from_zernike,
     load_accessories,
     generate_mask,
+    get_zernike_decay_weights,
 )
 
 
@@ -189,8 +190,9 @@ def test_random_combination(cfg, ctx):
     modes = ctx["modes"]; y_test = ctx["y_test"]; T_sim = ctx["T_sim"]
     n_amp = ctx["n_amp"]; n_batch = ctx["n_batch"]
     RMS_trad = np.zeros(n_batch); RMS_prop = np.zeros(n_batch)
+    wf_weights = get_zernike_decay_weights(cfg.n_wf_modes, cfg)
     for index in tqdm(range(n_batch), desc="随机组合测试", unit="样本"):
-        coe = cfg.wf_coeff_std * np.random.randn(cfg.n_wf_modes)
+        coe = cfg.wf_coeff_std * wf_weights * np.random.randn(cfg.n_wf_modes)
         A0 = reconstruct_from_zernike(y_test[index, :n_amp], modes) + y_test[index, -1]
         A1 = reconstruct_from_zernike(T_sim[index, :n_amp], modes) + T_sim[index, -1]
         RMS_trad[index], RMS_prop[index] = run_single_test(
@@ -205,8 +207,9 @@ def test_fixed_intensity(cfg, ctx):
     A1_fixed = reconstruct_from_zernike(T_sim[0, :n_amp], modes) + T_sim[0, -1]
     print(f"  固定光强取自测试样本 #0")
     RMS_trad = np.zeros(n_batch); RMS_prop = np.zeros(n_batch)
+    wf_weights = get_zernike_decay_weights(cfg.n_wf_modes, cfg)
     for index in tqdm(range(n_batch), desc="固定光强测试", unit="样本"):
-        coe = cfg.wf_coeff_std * np.random.randn(cfg.n_wf_modes)
+        coe = cfg.wf_coeff_std * wf_weights * np.random.randn(cfg.n_wf_modes)
         RMS_trad[index], RMS_prop[index] = run_single_test(
             ctx["hs"], ctx["mask"], ctx["Recon"], cfg, A0_fixed, A1_fixed, coe, modes)
     return RMS_trad, RMS_prop
@@ -215,7 +218,8 @@ def test_fixed_intensity(cfg, ctx):
 def test_fixed_wavefront(cfg, ctx):
     modes = ctx["modes"]; y_test = ctx["y_test"]; T_sim = ctx["T_sim"]
     n_amp = ctx["n_amp"]; n_batch = ctx["n_batch"]
-    coe_fixed = cfg.wf_coeff_std * np.random.randn(cfg.n_wf_modes)
+    wf_weights = get_zernike_decay_weights(cfg.n_wf_modes, cfg)
+    coe_fixed = cfg.wf_coeff_std * wf_weights * np.random.randn(cfg.n_wf_modes)
     print(f"  固定波前已生成 (coeff_std={cfg.wf_coeff_std})")
     RMS_trad = np.zeros(n_batch); RMS_prop = np.zeros(n_batch)
     for index in tqdm(range(n_batch), desc="固定波前测试", unit="样本"):

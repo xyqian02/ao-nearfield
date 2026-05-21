@@ -36,6 +36,7 @@ from src.utils import (
     reconstruct_from_zernike,
     load_accessories,
     generate_mask,
+    get_zernike_decay_weights,
 )
 
 
@@ -142,7 +143,8 @@ def main():
 
     # 6.1 生成随机波前
     np.random.seed(21)
-    coe = cfg.wf_coeff_std * np.random.randn(n_wf)
+    wf_weights = get_zernike_decay_weights(n_wf, cfg)
+    coe = cfg.wf_coeff_std * wf_weights * np.random.randn(n_wf)
     # 将跳过的低阶模式系数置零
     coe[:wf_skip] = 0.0
     wf = reconstruct_from_zernike(coe, modes)

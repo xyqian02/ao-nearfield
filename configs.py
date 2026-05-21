@@ -47,6 +47,8 @@ class SystemConfig:
     n_wf_modes: int = 35                # 波前泽尼克阶数 (Z2S 响应矩阵行数)
     wf_skip_count: int = 3              # 波前跳过前 N 个模式 (0=全用, 1=去piston, 2=去piston+tip, 3=去piston+tip+tilt)
     wf_coeff_std: float = 0.2           # 波前系数标准差 (仅 flag_wf=True 时使用)
+    wf_decay_scheme: str = "power_law"  # 衰减方案: "none" | "power_law" | "kolmogorov"
+    wf_decay_exponent: float = 1.6      # power_law 指数 (仅 power_law 方案)
 
     # =========================================================================
     # 数据生成参数

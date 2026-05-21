@@ -34,7 +34,7 @@ from src.utils import (
     generate_mask,
     generate_subcfg,
     save_mat,
-    reconstruct_from_zernike,
+    generate_simulation_data,
 )
 
 
@@ -91,45 +91,11 @@ def main():
     ):
         print(f"\n生成光强 {n_amp} 阶泽尼克数据...")
 
-        OutputData = np.zeros((cfg.n_samples, n_amp + 1))
-        InputData = np.zeros((cfg.n_samples, n_sub))
-
-        # 随机光强泽尼克系数 (N(0,1))
-        temp_coeffs = np.random.randn(cfg.n_samples, n_amp)
-        OutputData[:, :n_amp] = temp_coeffs
-
-        for i in tqdm(range(cfg.n_samples), desc=f"  {n_amp}阶", unit="样本"):
-
-            # ---- 重构近场振幅 (全图 image_size×image_size) ----
-            Ampl = reconstruct_from_zernike(OutputData[i, :n_amp], modes)
-
-            # 偏移确保非负
-            min_val = np.min(Ampl)
-            OutputData[i, n_amp] = -min_val
-            Ampl = Ampl - min_val
-
-            # ---- 可选: 叠加随机波前 ----
-            wf = np.zeros((IS, IS))
-            if cfg.flag_wf:
-                coe = cfg.wf_coeff_std * np.random.randn(cfg.n_wf_modes)
-                coe[:cfg.wf_skip_count] = 0.0  # 跳过低阶模式 (piston+tip+tilt)
-                wf = reconstruct_from_zernike(coe, modes)
-
-            InputField = Ampl * np.exp(-1j * wf)
-
-            # ---- 对每个子孔径进行衍射计算 ----
-            for i_sub in range(n_sub):
-                sub_field = hs._extract_sub_ap_field(InputField, i_sub)
-
-                result = optics.dl_propagate(sub_field)
-                spot = np.abs(result) ** 2
-
-                if cfg.flag_noise:
-                    spot = spot + 1.0 + cfg.noise_sigma * np.random.randn(
-                        cfg.sub_ap_pixels, cfg.sub_ap_pixels
-                    )
-
-                InputData[i, i_sub] = np.sum(spot)
+        InputData, OutputData = generate_simulation_data(
+            cfg, modes, subcfg, optics, hs,
+            n_samples=cfg.n_samples, n_amp=n_amp,
+            enhanced=False, seed=cfg.seed, show_progress=True,
+        )
 
         # ---- 保存数据 ----
         suffix = get_data_filename(cfg)

@@ -131,6 +131,32 @@ class ELM(BaseEstimator, RegressorMixin):
             y_pred = y_pred.ravel()
         return y_pred
 
+    def save(self, path: str) -> None:
+        """保存模型参数到 .npz 文件"""
+        if not hasattr(self, "IW_"):
+            raise RuntimeError("模型尚未训练，无法保存")
+        np.savez(
+            path,
+            IW=self.IW_, B=self.B_, LW=self.LW_,
+            n_hidden=self.n_hidden, activation=self.activation, alpha=self.alpha,
+        )
+
+    @staticmethod
+    def load(path: str) -> "ELM":
+        """从 .npz 文件加载模型"""
+        data = np.load(path, allow_pickle=True)
+        elm = ELM(
+            n_hidden=data["n_hidden"].item(),
+            activation=data["activation"].item(),
+            alpha=data["alpha"].item(),
+        )
+        elm.IW_ = data["IW"]
+        elm.B_ = data["B"]
+        elm.LW_ = data["LW"]
+        elm._n_features_in_ = elm.IW_.shape[1]
+        elm._n_outputs_ = elm.LW_.shape[1]
+        return elm
+
     def __repr__(self) -> str:
         return (
             f"ELM(n_hidden={self.n_hidden}, activation='{self.activation}', "
